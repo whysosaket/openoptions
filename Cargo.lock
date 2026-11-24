@@ -2173,11 +2173,15 @@ dependencies = [
  "eframe",
  "enigo",
  "hidapi",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "toml",
+ "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

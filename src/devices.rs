@@ -1,3 +1,4 @@
+use crate::pairing::{self, ReceiverLink};
 use hidapi::{BusType, HidApi};
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -11,6 +12,35 @@ pub struct Device {
     pub product_id: u16,
     pub connection: &'static str,
     pub interfaces: usize,
+    pub(crate) receiver: Option<ReceiverLink>,
+}
+
+impl Device {
+    pub fn direct(
+        name: String,
+        product_id: u16,
+        connection: &'static str,
+        interfaces: usize,
+    ) -> Self {
+        Self {
+            name,
+            product_id,
+            connection,
+            interfaces,
+            receiver: None,
+        }
+    }
+
+    pub fn unit_id(&self) -> Option<[u8; 4]> {
+        self.receiver.as_ref().map(|link| link.unit)
+    }
+
+    pub(crate) fn storage_connection(&self) -> std::borrow::Cow<'static, str> {
+        match self.unit_id() {
+            Some(unit) => format!("{}:{:08X}", self.connection, u32::from_be_bytes(unit)).into(),
+            None => self.connection.into(),
+        }
+    }
 }
 
 // hidapi keeps one IOHIDManager attached to the initializing thread's run loop.
@@ -42,7 +72,7 @@ pub(crate) fn with_hid<T: Send + 'static>(
 }
 
 pub fn connected() -> Result<Vec<Device>, String> {
-    with_hid(|api| {
+    let mut devices: Vec<Device> = with_hid(|api| {
         let mut models = BTreeMap::new();
         for interface in api
             .device_list()
@@ -66,16 +96,18 @@ pub fn connected() -> Result<Vec<Device>, String> {
             // List product groups. HID collections aren't physical device identities.
             let device = models
                 .entry((connection, product_id))
-                .or_insert_with(|| Device {
-                    name: name.into(),
-                    product_id,
-                    connection,
-                    interfaces: 0,
-                });
+                .or_insert_with(|| Device::direct(name.into(), product_id, connection, 0));
             device.interfaces += 1;
         }
         Ok(models.into_values().collect())
-    })
+    })?;
+    if devices
+        .iter()
+        .any(|device| matches!(device.product_id, 0xC548 | 0xC52B | 0xC532))
+    {
+        devices.extend(pairing::connected_peripherals());
+    }
+    Ok(devices)
 }
 
 pub fn open_bluetooth_settings() -> Result<(), String> {

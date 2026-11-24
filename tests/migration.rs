@@ -152,16 +152,13 @@ fn saved_control_assignments_survive_restart_and_leave_imports_intact() {
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("local.sqlite3");
-    let device = Device {
-        name: "MX Master 3S".into(),
-        product_id: 0xB034,
-        connection: "Bluetooth",
-        interfaces: 3,
-    };
-    let other_device = Device {
-        product_id: 0xB035,
-        ..device.clone()
-    };
+    let device = Device::direct("MX Master 3S".into(), 0xB034, "Bluetooth", 3);
+    let other_device = Device::direct(
+        device.name.clone(),
+        0xB035,
+        device.connection,
+        device.interfaces,
+    );
     let profile = Profile {
         device_name: device.name.clone(),
         ..Profile::default()
@@ -199,4 +196,54 @@ fn saved_control_assignments_survive_restart_and_leave_imports_intact() {
 
     store.save_bindings(&device, &Bindings::new()).unwrap();
     assert!(store.bindings(&device).unwrap().is_empty());
+}
+
+#[test]
+fn legacy_control_rows_keep_their_defaults_when_adding_a_profile_and_ring() {
+    use openoptions::controls::{ApplicationProfile, Layer};
+    use openoptions::devices::Device;
+    use openoptions::migration::{Action, Binding, NamedAction};
+    use openoptions::store::Store;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("controls.sqlite3");
+    let store = Store::open(&path).unwrap();
+    let device = Device::direct("MX Master 3S".into(), 0xB034, "Bluetooth", 3);
+    let legacy = r#"{"195":{"click":{"named":"copy"}}}"#;
+    let database = rusqlite::Connection::open(&path).unwrap();
+    database.execute(
+        "INSERT INTO control_profiles (connection, product_id, bindings_json) VALUES (?1, ?2, ?3)",
+        rusqlite::params![device.connection, device.product_id, legacy],
+    ).unwrap();
+    drop(database);
+
+    let mut profiles = store.customizations(&device).unwrap();
+    assert_eq!(
+        profiles.default.bindings[&195],
+        Binding::Click(Action::Named(NamedAction::Copy))
+    );
+    let mut layer = Layer::default();
+    layer.ring[0] = Some(Action::Shortcut("Ctrl+F".into()));
+    layer
+        .bindings
+        .insert(195, Binding::Click(Action::ShowActionsRing));
+    profiles.applications.insert(
+        "/example/editor".into(),
+        ApplicationProfile {
+            name: "Editor".into(),
+            layer,
+        },
+    );
+    store.save_customizations(&device, &profiles).unwrap();
+
+    let saved = Store::open(&path).unwrap().customizations(&device).unwrap();
+    assert_eq!(saved, profiles);
+    assert_eq!(
+        saved.effective_bindings(Some("/example/editor"))[&195],
+        Binding::Click(Action::ShowActionsRing)
+    );
+    assert_eq!(
+        saved.effective_bindings(Some("/unrelated"))[&195],
+        Binding::Click(Action::Named(NamedAction::Copy))
+    );
 }

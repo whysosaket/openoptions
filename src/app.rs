@@ -1,5 +1,5 @@
 use eframe::egui;
-use openoptions::controls::{Bindings, Control, Pointer};
+use openoptions::controls::{Control, Hosts, Pointer, Profiles};
 use openoptions::devices::{self, Device};
 use openoptions::migration::{self, Preview, Profile, Source, SourceKind};
 use openoptions::store::Store;
@@ -8,6 +8,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 mod action_labels;
 mod controls;
+mod feature_panels;
+mod pairing;
 mod theme;
 mod ui;
 mod workspace;
@@ -31,10 +33,14 @@ enum Event {
     ControlsLoaded(
         controls::DeviceKey,
         Result<Vec<Control>, String>,
-        Result<Bindings, String>,
+        Result<Profiles, String>,
         Option<Pointer>,
+        Result<Option<Hosts>, String>,
     ),
-    ControlsSaved(controls::DeviceKey, Result<Bindings, String>),
+    ControlsSaved(controls::DeviceKey, Result<Profiles, String>),
+    HostsRead(controls::DeviceKey, Result<Option<Hosts>, String>),
+    HostSwitched(controls::DeviceKey, Result<(), String>),
+    ReceiversLoaded(Result<Vec<openoptions::pairing::ReceiverDevice>, String>),
     PointerApplied(controls::DeviceKey, Result<Pointer, String>),
     Discovery(Vec<Source>, Result<Vec<Device>, String>),
     Preview(Source, Result<Preview, String>),
@@ -64,6 +70,9 @@ pub struct OpenOptions {
     profiles: Saved,
     editors: BTreeMap<controls::DeviceKey, controls::Editor>,
     live_controls: Option<controls::LiveControls>,
+    actions_ring: Option<feature_panels::RingWindow>,
+    pairing: Option<pairing::Wizard>,
+    rescan: bool,
 }
 
 impl OpenOptions {
@@ -88,6 +97,9 @@ impl OpenOptions {
             profiles: Vec::new(),
             editors: BTreeMap::new(),
             live_controls: None,
+            actions_ring: None,
+            pairing: None,
+            rescan: false,
         };
         app.scan(context);
         app.job(context, || {
@@ -151,9 +163,10 @@ impl OpenOptions {
     fn receive(&mut self) {
         for event in self.events.try_iter() {
             match event {
-                Event::ControlsLoaded(key, available, saved, pointer) => {
+                Event::ControlsLoaded(key, available, saved, pointer, hosts) => {
                     if let Some(editor) = self.editors.get_mut(&key) {
                         editor.loaded(available, saved);
+                        editor.hosts = Some(hosts);
                         if let Some(pointer) = pointer {
                             editor.pointer_loaded(pointer);
                         }
@@ -169,6 +182,32 @@ impl OpenOptions {
                             }
                             Err(error) => (format!("Could not save assignments. {error}"), true),
                         });
+                    }
+                }
+                Event::HostsRead(key, result) => {
+                    if let Some(editor) = self.editors.get_mut(&key) {
+                        editor.host_busy = false;
+                        editor.notice = result.as_ref().err().map(|error| (error.clone(), true));
+                        if result.is_ok() || editor.hosts.is_none() {
+                            editor.hosts = Some(result);
+                        }
+                    }
+                }
+                Event::HostSwitched(key, result) => {
+                    if let Some(editor) = self.editors.get_mut(&key) {
+                        editor.host_busy = false;
+                        editor.notice = Some(match result {
+                            Ok(()) => {
+                                self.rescan = true;
+                                ("Switch request sent to the device.".into(), false)
+                            }
+                            Err(error) => (error, true),
+                        });
+                    }
+                }
+                Event::ReceiversLoaded(result) => {
+                    if let Some(wizard) = &mut self.pairing {
+                        wizard.receivers = Some(result);
                     }
                 }
                 Event::PointerApplied(key, result) => {

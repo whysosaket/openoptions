@@ -2,6 +2,8 @@ use openoptions::migration::{Action, NamedAction};
 
 pub(super) fn action_label(action: &Action) -> &str {
     match action {
+        Action::ShowActionsRing => "Show Actions Ring",
+        Action::SwitchHost(_) => "Switch host channel",
         Action::OpenApplication(path) | Action::Shortcut(path) => path,
         Action::Named(action) => match action {
             NamedAction::NoAction => "Do nothing",
@@ -25,5 +27,12 @@ pub(super) fn action_label(action: &Action) -> &str {
             NamedAction::VolumeDown => "Volume down",
             NamedAction::Mute => "Mute",
         },
+    }
+}
+
+pub(super) fn action_name(action: &Action) -> String {
+    match action {
+        Action::SwitchHost(index) => format!("Switch to channel {}", usize::from(*index) + 1),
+        action => action_label(action).into(),
     }
 }

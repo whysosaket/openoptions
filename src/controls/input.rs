@@ -20,6 +20,7 @@ pub(super) fn connect() -> Result<Enigo, String> {
 pub(super) fn supports(action: &Action) -> bool {
     match action {
         Action::Shortcut(value) => shortcut(value).is_some(),
+        Action::ShowActionsRing | Action::SwitchHost(_) => true,
         Action::OpenApplication(path) => {
             let path = path.to_ascii_lowercase();
             Action::application(&path).is_some()
@@ -44,6 +45,9 @@ pub(super) fn perform(input: &mut Enigo, action: &Action) -> Result<(), String> 
     let meta = Key::Meta;
     let result = match action {
         Action::OpenApplication(path) => return launch(path),
+        Action::ShowActionsRing | Action::SwitchHost(_) => {
+            return Err("This action requires a device session.".into());
+        }
         Action::Shortcut(value) => {
             let (modifiers, key) = shortcut(value).ok_or("Invalid shortcut.")?;
             chord(input, &modifiers, key)

@@ -1,3 +1,7 @@
+mod hosts;
+mod profiles;
+pub use hosts::{Host, Hosts, host_channels, rename_host, switch_host};
+pub use profiles::{ApplicationProfile, Layer, Profiles, RING_SLOTS, Ring};
 mod input;
 mod pointer;
 pub use pointer::{Pointer, PointerChange, Wheel, apply_pointer, pointer};
@@ -13,6 +17,7 @@ use std::sync::{
     mpsc::{self, Receiver, TryRecvError},
 };
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 pub type Bindings = BTreeMap<u16, Binding>;
 
@@ -94,31 +99,40 @@ pub fn supports(action: &Action) -> bool {
 
 pub enum Status {
     Active,
+    Ring {
+        actions: Box<Ring>,
+        pointer: (i32, i32),
+    },
     Finished(Result<(), String>),
 }
 
 pub struct Session {
     stop: Arc<AtomicBool>,
     status: Receiver<Status>,
+    actions: mpsc::Sender<Action>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Session {
-    pub fn start(device: Device, bindings: Bindings) -> Self {
+    pub fn start(device: Device, profiles: Profiles) -> Self {
         let (send, status) = mpsc::channel();
+        let (actions, chosen) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let worker = thread::spawn(move || {
-            let result = run(&device, &bindings, &stopping, || {
-                let _ = send.send(Status::Active);
-            });
+            let result = run(&device, &profiles, &stopping, &send, &chosen);
             let _ = send.send(Status::Finished(result));
         });
         Self {
             stop,
             status,
+            actions,
             worker: Some(worker),
         }
+    }
+
+    pub fn choose_action(&self, action: Action) {
+        let _ = self.actions.send(action);
     }
 
     pub fn stop(&self) {
@@ -183,58 +197,82 @@ struct Press {
 
 fn run(
     device: &Device,
-    bindings: &Bindings,
+    profiles: &Profiles,
     stop: &AtomicBool,
-    active: impl FnOnce(),
+    status: &mpsc::Sender<Status>,
+    chosen: &Receiver<Action>,
 ) -> Result<(), String> {
     let mut hardware = protocol::Controls::open(device)?;
-    if bindings.is_empty() {
+    if !profiles.has_bindings() {
         return Err("Assign an action before enabling controls.".into());
     }
-    let mut planned = Vec::new();
-    for (&id, binding) in bindings {
-        let control = hardware
-            .available
-            .iter()
-            .find(|control| control.id == id)
-            .copied()
-            .ok_or_else(|| format!("Control {id:04X} is unavailable on this connection."))?;
-        match binding {
-            Binding::Click(action) if !supports(action) => {
-                return Err(format!(
-                    "Choose an action supported on this system for {}.",
-                    control.name()
-                ));
-            }
-            Binding::Gesture(actions)
-                if !control.mouse || actions.values().any(|action| !supports(action)) =>
-            {
-                return Err(format!("Check the gesture actions for {}.", control.name()));
-            }
-            _ => {}
-        }
-        hardware.check_available(control)?;
-        planned.push((control, matches!(binding, Binding::Gesture(_))));
-    }
     let mut input = input::connect()?;
-    if planned
-        .iter()
-        .any(|(control, gesture)| *gesture && !control.raw_motion)
+    for layer in std::iter::once(&profiles.default)
+        .chain(profiles.applications.values().map(|profile| &profile.layer))
     {
-        input
-            .location()
-            .map_err(|error| format!("Could not read pointer position. {error}"))?;
-    }
-    let result = (|| {
-        for &(control, gesture) in &planned {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(());
+        for (&id, binding) in &layer.bindings {
+            let control = hardware
+                .available
+                .iter()
+                .find(|control| control.id == id)
+                .ok_or_else(|| format!("Control {id:04X} is unavailable on this connection."))?;
+            match binding {
+                Binding::Click(action) if !supports(action) => {
+                    return Err(format!("Choose a supported action for {}.", control.name()));
+                }
+                Binding::Gesture(actions) => {
+                    if !control.mouse || actions.values().any(|action| !supports(action)) {
+                        return Err(format!("Check the gesture actions for {}.", control.name()));
+                    }
+                    if !control.raw_motion {
+                        input
+                            .location()
+                            .map_err(|error| format!("Could not read pointer position. {error}"))?;
+                    }
+                }
+                _ => {}
             }
-            hardware.divert(control, gesture)?;
         }
-        active();
+    }
+    let mut effective = Bindings::new();
+    let mut planned = Vec::new();
+    let mut app = None;
+    let mut next_check = Instant::now();
+    let mut ready = false;
+    let result = (|| {
         let mut pressed = BTreeMap::<u16, Press>::new();
         while !stop.load(Ordering::Relaxed) {
+            if let Ok(action) = chosen.try_recv()
+                && dispatch(
+                    &mut hardware,
+                    &mut input,
+                    status,
+                    &action,
+                    &profiles.layer(app.as_deref()).ring,
+                )?
+            {
+                return Ok(());
+            }
+            if pressed.is_empty() && Instant::now() >= next_check {
+                next_check = Instant::now() + Duration::from_millis(160);
+                let focus = if profiles.applications.is_empty() {
+                    None
+                } else {
+                    profiles::frontmost()
+                };
+                let focus = focus.filter(|key| profiles.applications.contains_key(key));
+                if !ready || focus != app {
+                    let next = profiles.effective_bindings(focus.as_deref());
+                    planned = arm_layer(&mut hardware, &effective, &next, stop)?;
+                    effective = next;
+                    app = focus;
+                }
+                if !ready {
+                    ready = true;
+                    let _ = status.send(Status::Active);
+                }
+            }
+
             match hardware.event()? {
                 Some(protocol::Event::Buttons(ids)) => {
                     for (control, gesture) in &planned {
@@ -264,17 +302,20 @@ fn run(
                             } else {
                                 press.motion.direction(75)
                             };
-                            let action = match &bindings[&id] {
+                            let action = match &effective[&id] {
                                 Binding::Click(action) => Some(action),
                                 Binding::Gesture(actions) => actions.get(&direction),
                             };
-                            if let Some(action) = action {
-                                input::perform(&mut input, action).map_err(|error| {
-                                    format!(
-                                        "Could not run the action for {}. {error}",
-                                        control.name()
-                                    )
-                                })?;
+                            if let Some(action) = action
+                                && dispatch(
+                                    &mut hardware,
+                                    &mut input,
+                                    status,
+                                    action,
+                                    &profiles.layer(app.as_deref()).ring,
+                                )?
+                            {
+                                return Ok(());
                             }
                         }
                     }
@@ -304,6 +345,62 @@ fn run(
         (Err(error), Err(restore)) => Err(format!("{error} {restore}")),
         (result, restored) => result.and(restored),
     }
+}
+
+fn arm_layer(
+    hardware: &mut protocol::Controls,
+    previous: &Bindings,
+    next: &Bindings,
+    stop: &AtomicBool,
+) -> Result<Vec<(Control, bool)>, String> {
+    let gesture = |binding: Option<&Binding>| matches!(binding, Some(Binding::Gesture(_)));
+    for (&id, binding) in previous {
+        if !next.contains_key(&id) || gesture(next.get(&id)) != gesture(Some(binding)) {
+            hardware.restore_control(id)?;
+        }
+    }
+    let mut armed = Vec::new();
+    for control in hardware.available.clone() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if let Some(binding) = next.get(&control.id) {
+            let is_gesture = gesture(Some(binding));
+            let before = previous.get(&control.id);
+            if before.is_none() || gesture(before) != is_gesture {
+                hardware.divert(control, is_gesture)?;
+            }
+            armed.push((control, is_gesture));
+        }
+    }
+    Ok(armed)
+}
+
+fn dispatch(
+    hardware: &mut protocol::Controls,
+    input: &mut enigo::Enigo,
+    status: &mpsc::Sender<Status>,
+    action: &Action,
+    ring: &Ring,
+) -> Result<bool, String> {
+    match action {
+        Action::ShowActionsRing => {
+            if ring.iter().any(Option::is_some) {
+                let pointer = input.location().map_err(|error| error.to_string())?;
+                let _ = status.send(Status::Ring {
+                    actions: Box::new(ring.clone()),
+                    pointer,
+                });
+            }
+        }
+        Action::SwitchHost(host) => {
+            hardware.restore()?;
+            hosts::switch_on_channel(hardware, *host)?;
+            return Ok(true);
+        }
+        action => input::perform(input, action)?,
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

@@ -21,6 +21,8 @@ pub(super) enum Event {
 
 pub(super) struct Controls {
     handle: HidDevice,
+    alternate: Option<HidDevice>,
+    target: u8,
     feature: u8,
     pub available: Vec<Control>,
     pending: BTreeMap<u16, u8>,
@@ -48,11 +50,12 @@ impl Controls {
     }
 
     pub(super) fn connect(device: &Device) -> Result<Self, String> {
+        if let Some(link) = &device.receiver {
+            let (handle, alternate) = link.open(device.product_id)?;
+            return Ok(Self::new(handle, alternate, link.slot));
+        }
         if matches!(device.product_id, 0xC548 | 0xC52B | 0xC532) {
-            return Err(
-                "Connect the peripheral directly over Bluetooth or USB to configure its controls."
-                    .into(),
-            );
+            return Err("Open a paired peripheral to configure its controls.".into());
         }
         let device = device.clone();
         let handle = with_hid(move |api| {
@@ -85,17 +88,38 @@ impl Controls {
                 format!("Could not open the controls interface. {error}")
             })
         })?;
-        Ok(Self {
+        Ok(Self::new(handle, None, DIRECT))
+    }
+
+    fn new(handle: HidDevice, alternate: Option<HidDevice>, target: u8) -> Self {
+        Self {
             handle,
+            alternate,
+            target,
             feature: 0,
             available: Vec::new(),
             pending: BTreeMap::new(),
-        })
+        }
     }
 
-    pub(super) fn check_available(&self, control: Control) -> Result<(), String> {
-        let flags = self.reporting(control.id)?;
-        require_idle(control, flags)
+    fn read(&self, report: &mut [u8; 20], timeout: i32) -> Result<usize, String> {
+        let delay = if self.alternate.is_some() {
+            timeout.min(25)
+        } else {
+            timeout
+        };
+        let size = self
+            .handle
+            .read_timeout(report, delay)
+            .map_err(|error| error.to_string())?;
+        if size == 0
+            && let Some(alternate) = &self.alternate
+        {
+            return alternate
+                .read_timeout(report, delay)
+                .map_err(|error| error.to_string());
+        }
+        Ok(size)
     }
 
     fn reporting(&self, id: u16) -> Result<u8, String> {
@@ -124,6 +148,14 @@ impl Controls {
         self.set_reporting(control.id, requested, mask)
     }
 
+    pub(super) fn restore_control(&mut self, id: u16) -> Result<(), String> {
+        if let Some(mask) = self.pending.get(&id).copied() {
+            self.set_reporting(id, 0, mask)?;
+            self.pending.remove(&id);
+        }
+        Ok(())
+    }
+
     pub(super) fn restore(&mut self) -> Result<(), String> {
         let mut failure = None;
         for (id, mask) in std::mem::take(&mut self.pending) {
@@ -150,11 +182,8 @@ impl Controls {
 
     pub(super) fn event(&mut self) -> Result<Option<Event>, String> {
         let mut report = [0; 20];
-        let read = self
-            .handle
-            .read_timeout(&mut report, 55)
-            .map_err(|error| error.to_string())?;
-        if read != report.len() || report[..3] != [LONG_REPORT, DIRECT, self.feature] {
+        let read = self.read(&mut report, 55)?;
+        if read != report.len() || report[..3] != [LONG_REPORT, self.target, self.feature] {
             return Ok(None);
         }
         let event = match report[3] {
@@ -178,15 +207,49 @@ impl Controls {
         Ok(Some(event))
     }
 
+    pub(super) fn notify(
+        &self,
+        feature: u8,
+        function: u8,
+        parameters: &[u8],
+    ) -> Result<(), String> {
+        self.send(feature, function, parameters).map(|_| ())
+    }
+
     pub(super) fn call(
         &self,
         feature: u8,
         function: u8,
         parameters: &[u8],
     ) -> Result<[u8; 16], String> {
+        let request = self.send(feature, function, parameters)?;
+        let command = request[3];
+        let deadline = Instant::now() + Duration::from_millis(600);
+        let mut reply = [0; 20];
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let timeout = remaining.as_millis().max(1) as i32;
+            let read = self.read(&mut reply, timeout)?;
+            if ((read == 20 && reply[0] == LONG_REPORT) || (read == 7 && reply[0] == 0x10))
+                && reply[1..4] == request[1..4]
+            {
+                let mut payload = [0; 16];
+                payload[..read - 4].copy_from_slice(&reply[4..read]);
+                return Ok(payload);
+            }
+            if read >= 6 && reply[1..5] == [self.target, 0xFF, feature, command] {
+                return Err(format!(
+                    "The device rejected a HID++ request (error {:02X}).",
+                    reply[5]
+                ));
+            }
+        }
+        Err("The device did not respond to a HID++ request.".into())
+    }
+    fn send(&self, feature: u8, function: u8, parameters: &[u8]) -> Result<[u8; 20], String> {
         let command = (function << 4) | SOFTWARE_ID;
         let mut request = [0; 20];
-        request[..4].copy_from_slice(&[LONG_REPORT, DIRECT, feature, command]);
+        request[..4].copy_from_slice(&[LONG_REPORT, self.target, feature, command]);
         request[4..4 + parameters.len()].copy_from_slice(parameters);
         let written = self
             .handle
@@ -195,30 +258,7 @@ impl Controls {
         if written < request.len() {
             return Err("The HID++ request was only partially written.".into());
         }
-        let deadline = Instant::now() + Duration::from_millis(600);
-        let mut reply = [0; 20];
-        while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let timeout = remaining.as_millis().max(1) as i32;
-            let read = self
-                .handle
-                .read_timeout(&mut reply, timeout)
-                .map_err(|error| error.to_string())?;
-            if ((read == 20 && reply[0] == LONG_REPORT) || (read == 7 && reply[0] == 0x10))
-                && reply[1..4] == request[1..4]
-            {
-                let mut payload = [0; 16];
-                payload[..read - 4].copy_from_slice(&reply[4..read]);
-                return Ok(payload);
-            }
-            if read >= 6 && reply[1..5] == [DIRECT, 0xFF, feature, command] {
-                return Err(format!(
-                    "The device rejected a HID++ request (error {:02X}).",
-                    reply[5]
-                ));
-            }
-        }
-        Err("The device did not respond to a HID++ request.".into())
+        Ok(request)
     }
 }
 

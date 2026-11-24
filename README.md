@@ -3,8 +3,9 @@
 A local desktop app for Logitech peripherals on macOS, Windows, and Linux.
 OpenOptions is an independent implementation in early development.
 
-- **Devices** lists connected Logitech HID products, including Bolt and
-  Unifying receivers. Bluetooth pairing opens the operating system’s settings.
+- **Devices** shows connected Logitech peripherals. **Add Device** opens Bolt
+  and Unifying receiver pairing and offers Bluetooth pairing through the operating
+  system. Bolt pairing shows the receiver’s keyboard code or mouse click sequence.
 - **Import settings** looks for config files from supported apps in their
   standard locations. Select **Preview**, review the mapped settings and
   skipped items, then choose **Import** to save local profiles. You can also
@@ -15,6 +16,14 @@ OpenOptions is an independent implementation in early development.
   Choose a control, assign an action or keyboard shortcut, and save. Mouse
   gestures have separate assignments for a press and four swipe directions.
   Use **Load imported assignments** to copy supported mappings into the editor.
+  The **Profile** bar adds overrides for individual applications. OpenOptions
+  follows the foreground app and inherits default bindings for other controls.
+- **Actions Ring** gives each profile eight configurable slots. Assign
+  **Show Actions Ring** to a button, key, or gesture to open the ring at the
+  pointer. The editor includes a preview.
+- **Easy-Switch** in the **Device** section shows paired host channels and their
+  available connection and OS details. Supported devices can rename channels
+  or switch directly, including from a button assignment or an Actions Ring slot.
 - **Point & Scroll** reads and applies DPI and SmartShift settings on compatible
   devices. OpenOptions shows these controls when the connected device reports
   the corresponding capabilities.
@@ -35,11 +44,11 @@ Linux users can import a settings database copied from macOS or Windows.
 
 | Area | Current coverage |
 | --- | --- |
-| Button and key customization | Direct HID++ controls, system and media actions, shortcuts, application launch, and five-way mouse gestures. |
+| Button and key customization | HID++ controls, system and media actions, shortcuts, application launch, and five-way mouse gestures. Direct and supported receiver-attached devices. |
 | Device tuning | Adjustable DPI and SmartShift on compatible devices. Model-specific modes, scroll tuning, backlight, camera, and lighting are pending. |
-| Connection | Direct Bluetooth and USB device discovery and system Bluetooth pairing. Receiver-attached controls, in-app receiver pairing, and Easy-Switch are pending. |
-| Profiles | Local import and per-model assignments. Per-app switching, device settings restore, and backup are pending. |
-| Workflow features | Actions Ring, Smart Actions, and Flow are pending. |
+| Connection | Bluetooth and USB discovery, Bolt and Unifying pairing, and Easy-Switch read, rename, and switch on supported hardware. Receiver model coverage and physical verification are pending. |
+| Profiles | Local import, default mappings, and foreground-app overrides on macOS, Windows, and Linux X11. Device settings restore and backup are pending. |
+| Workflow features | Eight-slot Actions Ring with per-app layouts. Nested ring folders, Smart Actions, and Flow are pending. |
 | Linux live input | X11. System-wide Wayland actions are pending. |
 
 ## Build
@@ -62,7 +71,6 @@ item actions in the workspace header or the relevant row.
 ## Credits
 
 [OpenLogi](https://github.com/AprilNEA/OpenLogi) inspired this project.
-The device workspace uses OpenLogi’s control-and-inspector layout as its reference.
-The app shell takes inspiration from Prathamesh’s
-[shared index](https://github.com/quaylabshq/orka/pull/198) and
-[detail layouts](https://github.com/quaylabshq/orka/pull/72) for Orka.
+The device gallery, detail workspace, profile bar, pairing flow, and Actions Ring
+use OpenLogi’s layout and light palette as their design reference. OpenOptions
+uses its own name and illustrations.

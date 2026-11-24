@@ -158,6 +158,8 @@ pub enum Action {
     Named(NamedAction),
     OpenApplication(String),
     Shortcut(String),
+    ShowActionsRing,
+    SwitchHost(u8),
 }
 
 impl Action {

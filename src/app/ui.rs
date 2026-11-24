@@ -1,59 +1,59 @@
 use super::{Detail, Notice, OpenOptions, Page, action_labels::action_label, theme::*, workspace};
 use eframe::egui::{self, Button, CentralPanel, Frame, RichText, ScrollArea, TextEdit, Ui, Vec2};
-use openoptions::devices::{self, Device};
+use openoptions::devices::Device;
 use openoptions::migration::{
     Action, Binding, Profile, ScrollDirection, Source, SourceKind, WheelMode,
 };
 use std::path::PathBuf;
 
 impl eframe::App for OpenOptions {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.; 4]
+    }
+
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
         self.receive();
         self.poll_controls(root.ctx());
-        let rail_width = if root.available_width() < 780. {
-            164.
-        } else {
-            202.
-        };
+        if self.rescan {
+            self.rescan = false;
+            self.scan(root.ctx());
+        }
         let device_detail = matches!(self.detail, Some(Detail::Device(_)));
         if !device_detail {
-            egui::Panel::left("navigation")
-                .exact_size(rail_width)
+            egui::Panel::top("navigation")
                 .resizable(false)
                 .show_separator_line(false)
-                .frame(Frame::new().fill(WINDOW).inner_margin(11))
+                .frame(Frame::new().fill(SURFACE).inner_margin(12))
                 .show_inside(root, |ui| {
                     #[cfg(target_os = "macos")]
-                    ui.add_space(28.);
-                    ui.add_space(7.);
                     ui.horizontal(|ui| {
-                        ui.add_space(5.);
+                        ui.add_space(71.);
+                        ui.label(title("OpenOptions", 13.));
+                    });
+                    ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
                         mark(ui.painter(), rect.center());
-                        ui.label(title("OpenOptions", 14.));
-                    });
-                    ui.add_space(19.);
-                    ui.spacing_mut().item_spacing.y = 5.;
-                    for (page, label, symbol) in [
-                        (Page::Devices, "Devices", Icon::Mouse),
-                        (Page::Import, "Import", Icon::Import),
-                        (Page::Profiles, "Profiles", Icon::Profiles),
-                    ] {
-                        if nav(ui, label, symbol, self.page == page) {
-                            self.navigate(page);
+                        for (page, label) in [
+                            (Page::Devices, "Devices"),
+                            (Page::Import, "Import"),
+                            (Page::Profiles, "Profiles"),
+                        ] {
+                            if ui.selectable_label(self.page == page, label).clicked() {
+                                self.navigate(page);
+                            }
                         }
-                    }
+                    });
                 });
         }
-        let mut margin = egui::Margin::same(8);
+        let mut margin = egui::Margin::same(0);
         if cfg!(target_os = "macos") && device_detail {
-            margin.top = 32;
+            margin.top = 30;
         }
         CentralPanel::default()
             .frame(Frame::new().fill(WINDOW).inner_margin(margin))
             .show_inside(root, |ui| {
-                surface(0).show(ui, |ui| {
+                Frame::new().fill(WINDOW).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     ui.spacing_mut().item_spacing.y = 0.;
                     self.header(ui);
@@ -79,6 +79,8 @@ impl eframe::App for OpenOptions {
                     });
                 });
             });
+        self.show_pairing(root.ctx());
+        self.show_actions_ring(root);
     }
 }
 
@@ -121,14 +123,8 @@ impl OpenOptions {
             {
                 self.stop_controls();
             }
-            if inventory
-                && ui
-                    .add(primary("Pair over Bluetooth"))
-                    .on_hover_text("Open your system Bluetooth settings")
-                    .clicked()
-                && let Err(error) = devices::open_bluetooth_settings()
-            {
-                self.notice = Some(Notice::Error(error));
+            if inventory && ui.add(primary("+ Add Device")).clicked() {
+                self.open_pairing(ui.ctx());
             }
             if sources {
                 if labeled_button(ui, "Scan again", Icon::Refresh, !self.scanning).clicked() {
@@ -238,35 +234,26 @@ impl OpenOptions {
                         },
                     );
                 } else {
-                    workspace::index(
-                        ui,
-                        "devices",
-                        ["Device", "Connection", "Status"],
-                        55.,
-                        |ui, columns| {
-                            for (index, device) in rows.enumerate() {
-                                if index > 0 {
-                                    workspace::divider(ui);
-                                }
-                                columns.row(
-                                    ui,
-                                    |ui| {
-                                        if workspace::row_title(
-                                            ui,
-                                            &device.name,
-                                            device_icon(device),
-                                        ) {
-                                            selected = Some(device.clone());
+                    let visible: Vec<_> = rows.collect();
+                    let columns = if ui.available_width() >= 950. { 3 } else { 2 };
+                    ScrollArea::vertical()
+                        .id_salt("device-gallery")
+                        .show(ui, |ui| {
+                            let edge = ((ui.available_width() - 16. * (columns as f32 - 1.))
+                                / columns as f32)
+                                .min(326.);
+                            for row in visible.chunks(columns) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 16.;
+                                    for device in row {
+                                        if device_tile(ui, device, edge) {
+                                            selected = Some((*device).clone());
                                         }
-                                    },
-                                    |ui| {
-                                        clipped(ui, muted(device.connection), device.connection);
-                                    },
-                                    |ui| workspace::badge(ui, "Connected", true),
-                                );
+                                    }
+                                });
+                                ui.add_space(7.);
                             }
-                        },
-                    );
+                        });
                 }
             }
         }
@@ -561,6 +548,48 @@ fn show_notice(ui: &mut Ui, notice: Option<&Notice>) {
         ui.set_min_width(ui.available_width());
         ui.label(RichText::new(copy).color(color));
     });
+}
+
+fn device_tile(ui: &mut Ui, device: &Device, width: f32) -> bool {
+    let (_, response) = ui.allocate_exact_size(egui::vec2(width, 230.), egui::Sense::click());
+    let rect = response.rect;
+    let painter = ui.painter_at(rect);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &device.name));
+    painter.rect(
+        rect.shrink(1.),
+        10,
+        if response.hovered() { HOVER } else { SURFACE },
+        line(),
+        egui::StrokeKind::Inside,
+    );
+    let illustration = egui::Rect::from_center_size(
+        rect.center_top() + egui::vec2(0., 88.),
+        egui::Vec2::splat(107.),
+    );
+    paint_icon(&painter, illustration, device_icon(device), MUTED);
+    let details = rect.left_bottom() + egui::vec2(17., -61.);
+    let mut name: String = device.name.chars().take(30).collect();
+    if device.name.chars().count() > 30 {
+        name.push('…');
+    }
+    painter.text(
+        details,
+        egui::Align2::LEFT_TOP,
+        name,
+        egui::FontId::proportional(16.),
+        TEXT,
+    );
+    painter.circle_filled(details + egui::vec2(4., 34.), 3.5, SUCCESS);
+    painter.text(
+        details + egui::vec2(14., 34.),
+        egui::Align2::LEFT_CENTER,
+        format!("Connected · {}", device.connection),
+        egui::FontId::proportional(12.),
+        MUTED,
+    );
+    paint_focus(ui, &response);
+    response.on_hover_text(&device.name).clicked()
 }
 
 fn device_icon(device: &Device) -> Icon {
