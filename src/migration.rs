@@ -157,10 +157,13 @@ pub enum Binding {
 pub enum Action {
     Named(NamedAction),
     OpenApplication(String),
+    Shortcut(String),
+    ShowActionsRing,
+    SwitchHost(u8),
 }
 
 impl Action {
-    fn application(path: &str) -> Option<Self> {
+    pub fn application(path: &str) -> Option<Self> {
         let lower = path.to_ascii_lowercase();
         let unix = path.starts_with('/') && !path.starts_with("//");
         let windows = path.as_bytes().get(0..3).is_some_and(|head| {
@@ -199,6 +202,29 @@ pub enum NamedAction {
 }
 
 impl NamedAction {
+    pub const ALL: [Self; 20] = [
+        Self::NoAction,
+        Self::MiddleClick,
+        Self::Back,
+        Self::Forward,
+        Self::Copy,
+        Self::Cut,
+        Self::Paste,
+        Self::Undo,
+        Self::Redo,
+        Self::MissionControl,
+        Self::AppExpose,
+        Self::Desktop,
+        Self::PreviousDesktop,
+        Self::NextDesktop,
+        Self::PlayPause,
+        Self::PreviousTrack,
+        Self::NextTrack,
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::Mute,
+    ];
+
     fn from_config(value: &str) -> Option<Self> {
         Some(match value {
             "None" => Self::NoAction,

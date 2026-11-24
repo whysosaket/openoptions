@@ -1,5 +1,7 @@
+use crate::controls::{Bindings, Layer, Profiles};
+use crate::devices::Device;
 use crate::migration::{Preview, Profile, SourceKind};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,10 +31,60 @@ impl Store {
                 source TEXT NOT NULL,
                 profile_json TEXT NOT NULL,
                 UNIQUE (source, profile_json)
+            );
+            CREATE TABLE IF NOT EXISTS control_profiles (
+                connection TEXT NOT NULL,
+                product_id INTEGER NOT NULL,
+                bindings_json TEXT NOT NULL,
+                PRIMARY KEY (connection, product_id)
             );",
             )
             .map_err(|error| error.to_string())?;
         Ok(Self { connection })
+    }
+
+    pub fn customizations(&self, device: &Device) -> Result<Profiles, String> {
+        let json = self.connection.query_row(
+            "SELECT bindings_json FROM control_profiles WHERE connection = ?1 AND product_id = ?2",
+            params![device.storage_connection().as_ref(), device.product_id],
+            |row| row.get::<_, String>(0),
+        ).optional().map_err(|error| error.to_string())?;
+        let Some(json) = json else {
+            return Ok(Profiles::default());
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        if value.get("default").is_some() {
+            return serde_json::from_value(value).map_err(|error| error.to_string());
+        }
+        let bindings = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        Ok(Profiles {
+            default: Layer {
+                bindings,
+                ..Layer::default()
+            },
+            ..Profiles::default()
+        })
+    }
+
+    pub fn bindings(&self, device: &Device) -> Result<Bindings, String> {
+        Ok(self.customizations(device)?.default.bindings)
+    }
+
+    pub fn save_bindings(&self, device: &Device, bindings: &Bindings) -> Result<(), String> {
+        let mut profiles = self.customizations(device)?;
+        profiles.default.bindings = bindings.clone();
+        self.save_customizations(device, &profiles)
+    }
+
+    pub fn save_customizations(&self, device: &Device, profiles: &Profiles) -> Result<(), String> {
+        let json = serde_json::to_string(profiles).map_err(|error| error.to_string())?;
+        self.connection.execute(
+            "INSERT INTO control_profiles (connection, product_id, bindings_json) VALUES (?1, ?2, ?3)
+            ON CONFLICT (connection, product_id) DO UPDATE SET bindings_json = excluded.bindings_json",
+            params![device.storage_connection().as_ref(), device.product_id, json],
+        ).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn import(&mut self, source: SourceKind, preview: &Preview) -> Result<usize, String> {
