@@ -2,7 +2,7 @@ use openoptions::migration::{Action, NamedAction};
 
 pub(super) fn action_label(action: &Action) -> &str {
     match action {
-        Action::OpenApplication(path) => path,
+        Action::OpenApplication(path) | Action::Shortcut(path) => path,
         Action::Named(action) => match action {
             NamedAction::NoAction => "Do nothing",
             NamedAction::MiddleClick => "Middle click",

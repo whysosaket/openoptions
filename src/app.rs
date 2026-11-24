@@ -1,10 +1,13 @@
 use eframe::egui;
+use openoptions::controls::{Bindings, Control, Pointer};
 use openoptions::devices::{self, Device};
 use openoptions::migration::{self, Preview, Profile, Source, SourceKind};
 use openoptions::store::Store;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 mod action_labels;
+mod controls;
 mod theme;
 mod ui;
 mod workspace;
@@ -25,6 +28,14 @@ enum Detail {
 type Saved = Vec<(SourceKind, Profile)>;
 
 enum Event {
+    ControlsLoaded(
+        controls::DeviceKey,
+        Result<Vec<Control>, String>,
+        Result<Bindings, String>,
+        Option<Pointer>,
+    ),
+    ControlsSaved(controls::DeviceKey, Result<Bindings, String>),
+    PointerApplied(controls::DeviceKey, Result<Pointer, String>),
     Discovery(Vec<Source>, Result<Vec<Device>, String>),
     Preview(Source, Result<Preview, String>),
     Store(Result<(Option<usize>, Saved), String>),
@@ -51,6 +62,8 @@ pub struct OpenOptions {
     notice: Option<Notice>,
     writing: bool,
     profiles: Saved,
+    editors: BTreeMap<controls::DeviceKey, controls::Editor>,
+    live_controls: Option<controls::LiveControls>,
 }
 
 impl OpenOptions {
@@ -73,6 +86,8 @@ impl OpenOptions {
             notice: None,
             writing: true,
             profiles: Vec::new(),
+            editors: BTreeMap::new(),
+            live_controls: None,
         };
         app.scan(context);
         app.job(context, || {
@@ -136,6 +151,40 @@ impl OpenOptions {
     fn receive(&mut self) {
         for event in self.events.try_iter() {
             match event {
+                Event::ControlsLoaded(key, available, saved, pointer) => {
+                    if let Some(editor) = self.editors.get_mut(&key) {
+                        editor.loaded(available, saved);
+                        if let Some(pointer) = pointer {
+                            editor.pointer_loaded(pointer);
+                        }
+                    }
+                }
+                Event::ControlsSaved(key, result) => {
+                    if let Some(editor) = self.editors.get_mut(&key) {
+                        editor.saving = false;
+                        editor.notice = Some(match result {
+                            Ok(bindings) => {
+                                editor.saved = Ok(bindings);
+                                ("Assignments saved.".into(), false)
+                            }
+                            Err(error) => (format!("Could not save assignments. {error}"), true),
+                        });
+                    }
+                }
+                Event::PointerApplied(key, result) => {
+                    if let Some(editor) = self.editors.get_mut(&key) {
+                        editor.pointer_busy = false;
+                        editor.notice = Some(match result {
+                            Ok(pointer) => {
+                                editor.pointer_loaded(pointer);
+                                ("Device settings applied.".into(), false)
+                            }
+                            Err(error) => {
+                                (format!("Could not apply device settings. {error}"), true)
+                            }
+                        });
+                    }
+                }
                 Event::Discovery(sources, devices) => {
                     self.sources = sources;
                     self.devices = devices;

@@ -9,40 +9,49 @@ use std::path::PathBuf;
 impl eframe::App for OpenOptions {
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
         self.receive();
+        self.poll_controls(root.ctx());
         let rail_width = if root.available_width() < 780. {
             164.
         } else {
             202.
         };
-        egui::Panel::left("navigation")
-            .exact_size(rail_width)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(Frame::new().fill(WINDOW).inner_margin(11))
-            .show_inside(root, |ui| {
-                #[cfg(target_os = "macos")]
-                ui.add_space(28.);
-                ui.add_space(7.);
-                ui.horizontal(|ui| {
-                    ui.add_space(5.);
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
-                    mark(ui.painter(), rect.center());
-                    ui.label(title("OpenOptions", 14.));
-                });
-                ui.add_space(19.);
-                ui.spacing_mut().item_spacing.y = 5.;
-                for (page, label, symbol) in [
-                    (Page::Devices, "Devices", Icon::Mouse),
-                    (Page::Import, "Import", Icon::Import),
-                    (Page::Profiles, "Profiles", Icon::Profiles),
-                ] {
-                    if nav(ui, label, symbol, self.page == page) {
-                        self.navigate(page);
+        let device_detail = matches!(self.detail, Some(Detail::Device(_)));
+        if !device_detail {
+            egui::Panel::left("navigation")
+                .exact_size(rail_width)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(Frame::new().fill(WINDOW).inner_margin(11))
+                .show_inside(root, |ui| {
+                    #[cfg(target_os = "macos")]
+                    ui.add_space(28.);
+                    ui.add_space(7.);
+                    ui.horizontal(|ui| {
+                        ui.add_space(5.);
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
+                        mark(ui.painter(), rect.center());
+                        ui.label(title("OpenOptions", 14.));
+                    });
+                    ui.add_space(19.);
+                    ui.spacing_mut().item_spacing.y = 5.;
+                    for (page, label, symbol) in [
+                        (Page::Devices, "Devices", Icon::Mouse),
+                        (Page::Import, "Import", Icon::Import),
+                        (Page::Profiles, "Profiles", Icon::Profiles),
+                    ] {
+                        if nav(ui, label, symbol, self.page == page) {
+                            self.navigate(page);
+                        }
                     }
-                }
-            });
+                });
+        }
+        let mut margin = egui::Margin::same(8);
+        if cfg!(target_os = "macos") && device_detail {
+            margin.top = 32;
+        }
         CentralPanel::default()
-            .frame(Frame::new().fill(WINDOW).inner_margin(8))
+            .frame(Frame::new().fill(WINDOW).inner_margin(margin))
             .show_inside(root, |ui| {
                 surface(0).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
@@ -52,8 +61,13 @@ impl eframe::App for OpenOptions {
                     Frame::new().inner_margin(inset).show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 10.;
-                        if let Some(detail) = &self.detail {
-                            self.detail_ui(ui, detail);
+                        if let Some(detail) = self.detail.clone() {
+                            match detail {
+                                Detail::Device(device) => self.device_settings(ui, &device),
+                                Detail::Profile(kind, profile) => {
+                                    self.profile_detail(ui, kind, &profile)
+                                }
+                            }
                         } else {
                             match self.page {
                                 Page::Devices => self.devices_ui(ui),
@@ -80,7 +94,7 @@ impl OpenOptions {
     fn header(&mut self, ui: &mut Ui) {
         let review = self.page == Page::Import && self.preview.is_some();
         let title = match (&self.detail, self.page) {
-            (Some(Detail::Device(_)), _) => "Device details",
+            (Some(Detail::Device(device)), _) => &device.name,
             (Some(Detail::Profile(..)), _) => "Profile details",
             (_, Page::Devices) => "Devices",
             (_, Page::Import) if review => "Review import",
@@ -90,7 +104,23 @@ impl OpenOptions {
         let inventory = self.detail.is_none() && self.page == Page::Devices;
         let sources = self.page == Page::Import && !review;
         let back_enabled = (self.detail.is_some() || review).then_some(!self.writing);
-        let back = workspace::header(ui, title, back_enabled, |ui| {
+        let title = title.to_owned();
+        let back = workspace::header(ui, &title, back_enabled, |ui| {
+            if let Some(live) = &self.live_controls
+                && ui
+                    .add_enabled(
+                        !live.stopping,
+                        Button::new(if live.stopping {
+                            "Disabling…"
+                        } else {
+                            "Disable live controls"
+                        }),
+                    )
+                    .on_hover_text(&live.name)
+                    .clicked()
+            {
+                self.stop_controls();
+            }
             if inventory
                 && ui
                     .add(primary("Pair over Bluetooth"))
@@ -241,7 +271,7 @@ impl OpenOptions {
             }
         }
         if let Some(device) = selected {
-            self.detail = Some(Detail::Device(device));
+            self.open_device(device, ui.ctx());
         }
         if !self.sources.is_empty() {
             ui.horizontal(|ui| {
@@ -472,41 +502,14 @@ impl OpenOptions {
         }
     }
 
-    fn detail_ui(&self, ui: &mut Ui, detail: &Detail) {
+    fn profile_detail(&self, ui: &mut Ui, kind: SourceKind, profile: &Profile) {
         ScrollArea::vertical()
-            .id_salt("detail")
+            .id_salt("profile-detail")
             .auto_shrink([false, false])
-            .show(ui, |ui| match detail {
-                Detail::Device(previous) => {
-                    let device = self.devices.as_ref().ok().and_then(|devices| {
-                        devices.iter().find(|device| {
-                            device.product_id == previous.product_id
-                                && device.connection == previous.connection
-                        })
-                    });
-                    let status = match (&self.devices, device) {
-                        (_, Some(_)) => "Connected",
-                        (Err(_), None) => "Unknown",
-                        _ => "Disconnected",
-                    };
-                    ui.label(title(&previous.name, 23.));
-                    workspace::badge(ui, status, device.is_some());
-                    ui.label(title("Hardware", 15.));
-                    let device = device.unwrap_or(previous);
-                    facts(
-                        ui,
-                        [
-                            ("Connection", device.connection.to_string()),
-                            ("Product ID", format!("046D:{:04X}", device.product_id)),
-                            ("HID interfaces", device.interfaces.to_string()),
-                        ],
-                    );
-                }
-                Detail::Profile(kind, profile) => {
-                    ui.label(title(self.profile_name(profile, *kind), 23.));
-                    ui.label(muted(format!("Imported from {}", kind.name())));
-                    profile_sections(ui, profile);
-                }
+            .show(ui, |ui| {
+                ui.label(title(self.profile_name(profile, kind), 23.));
+                ui.label(muted(format!("Imported from {}", kind.name())));
+                profile_sections(ui, profile);
             });
     }
 

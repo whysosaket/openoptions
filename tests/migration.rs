@@ -139,3 +139,64 @@ fn sqlite_preview_reads_latest_wal_snapshot_and_the_store_is_idempotent() {
     let saved = Store::open(&storage).unwrap().profiles().unwrap();
     assert_eq!(saved[1], (SourceKind::Vendor, preview.profiles[0].clone()));
 }
+
+#[test]
+fn saved_control_assignments_survive_restart_and_leave_imports_intact() {
+    use openoptions::controls::Bindings;
+    use openoptions::devices::Device;
+    use openoptions::migration::{
+        Action, Binding, Direction, NamedAction, Preview, Profile, SourceKind,
+    };
+    use openoptions::store::Store;
+    use std::collections::BTreeMap;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("local.sqlite3");
+    let device = Device {
+        name: "MX Master 3S".into(),
+        product_id: 0xB034,
+        connection: "Bluetooth",
+        interfaces: 3,
+    };
+    let other_device = Device {
+        product_id: 0xB035,
+        ..device.clone()
+    };
+    let profile = Profile {
+        device_name: device.name.clone(),
+        ..Profile::default()
+    };
+    let mut store = Store::open(&path).unwrap();
+    store
+        .import(
+            SourceKind::Vendor,
+            &Preview {
+                profiles: vec![profile.clone()],
+                ..Preview::default()
+            },
+        )
+        .unwrap();
+    let bindings = Bindings::from([
+        (
+            0x53,
+            Binding::Click(Action::Shortcut("Ctrl+Shift+K".into())),
+        ),
+        (
+            0xC3,
+            Binding::Gesture(BTreeMap::from([
+                (Direction::Click, Action::Named(NamedAction::MiddleClick)),
+                (Direction::Right, Action::Named(NamedAction::NextDesktop)),
+            ])),
+        ),
+    ]);
+    store.save_bindings(&device, &bindings).unwrap();
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.bindings(&device).unwrap(), bindings);
+    assert!(store.bindings(&other_device).unwrap().is_empty());
+    assert_eq!(store.profiles().unwrap(), [(SourceKind::Vendor, profile)]);
+
+    store.save_bindings(&device, &Bindings::new()).unwrap();
+    assert!(store.bindings(&device).unwrap().is_empty());
+}

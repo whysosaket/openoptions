@@ -1,5 +1,7 @@
+use crate::controls::Bindings;
+use crate::devices::Device;
 use crate::migration::{Preview, Profile, SourceKind};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,10 +31,38 @@ impl Store {
                 source TEXT NOT NULL,
                 profile_json TEXT NOT NULL,
                 UNIQUE (source, profile_json)
+            );
+            CREATE TABLE IF NOT EXISTS control_profiles (
+                connection TEXT NOT NULL,
+                product_id INTEGER NOT NULL,
+                bindings_json TEXT NOT NULL,
+                PRIMARY KEY (connection, product_id)
             );",
             )
             .map_err(|error| error.to_string())?;
         Ok(Self { connection })
+    }
+
+    pub fn bindings(&self, device: &Device) -> Result<Bindings, String> {
+        let json = self.connection.query_row(
+            "SELECT bindings_json FROM control_profiles WHERE connection = ?1 AND product_id = ?2",
+            params![device.connection, device.product_id],
+            |row| row.get::<_, String>(0),
+        ).optional().map_err(|error| error.to_string())?;
+        json.map_or_else(
+            || Ok(Bindings::default()),
+            |json| serde_json::from_str(&json).map_err(|error| error.to_string()),
+        )
+    }
+
+    pub fn save_bindings(&self, device: &Device, bindings: &Bindings) -> Result<(), String> {
+        let json = serde_json::to_string(bindings).map_err(|error| error.to_string())?;
+        self.connection.execute(
+            "INSERT INTO control_profiles (connection, product_id, bindings_json) VALUES (?1, ?2, ?3)
+            ON CONFLICT (connection, product_id) DO UPDATE SET bindings_json = excluded.bindings_json",
+            params![device.connection, device.product_id, json],
+        ).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn import(&mut self, source: SourceKind, preview: &Preview) -> Result<usize, String> {

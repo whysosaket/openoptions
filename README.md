@@ -11,16 +11,36 @@ OpenOptions is an independent implementation in early development.
   supply a copied TOML, SQLite, or Options+ JSON settings file.
 - **Profiles** shows saved imports. Reimporting the same settings is safe.
   OpenOptions reads source files and saves profiles to its own local database.
+- **Buttons and Keys** lists programmable controls on directly connected devices.
+  Choose a control, assign an action or keyboard shortcut, and save. Mouse
+  gestures have separate assignments for a press and four swipe directions.
+  Use **Load imported assignments** to copy supported mappings into the editor.
+- **Point & Scroll** reads and applies DPI and SmartShift settings on compatible
+  devices. OpenOptions shows these controls when the connected device reports
+  the corresponding capabilities.
 
-This build supports migration of common mouse button and gesture mappings,
-application launch paths, scrolling, and available DPI and SmartShift values.
-Options+ uses its own scales for pointer speed and SmartShift sensitivity.
-Those values are reported as skipped until they can be validated on the device.
-Linux users can import a database copied from macOS or Windows.
+To use saved button or key mappings, choose **Enable live controls** and keep
+the desktop app running. OpenOptions releases temporary reporting when you
+disable live controls or quit. On macOS, grant Input Monitoring for device
+access and Accessibility for desktop actions. Live desktop actions use X11 on
+Linux. On devices without raw gesture movement, swipes use the cursor's
+displacement and can be limited by screen edges.
 
-Live remapping, applying saved profiles, and in-app receiver pairing are under
-development. OpenOptions runs as one desktop process with no background agent
-or network service.
+Import covers common mouse bindings, gestures, application launch paths,
+scrolling, and available DPI and SmartShift values. Options+ uses proprietary
+pointer speed and sensitivity scales, which the preview reports as skipped.
+Linux users can import a settings database copied from macOS or Windows.
+
+## Options+ parity
+
+| Area | Current coverage |
+| --- | --- |
+| Button and key customization | Direct HID++ controls, system and media actions, shortcuts, application launch, and five-way mouse gestures. |
+| Device tuning | Adjustable DPI and SmartShift on compatible devices. Model-specific modes, scroll tuning, backlight, camera, and lighting are pending. |
+| Connection | Direct Bluetooth and USB device discovery and system Bluetooth pairing. Receiver-attached controls, in-app receiver pairing, and Easy-Switch are pending. |
+| Profiles | Local import and per-model assignments. Per-app switching, device settings restore, and backup are pending. |
+| Workflow features | Actions Ring, Smart Actions, and Flow are pending. |
+| Linux live input | X11. System-wide Wayland actions are pending. |
 
 ## Build
 
@@ -42,6 +62,7 @@ item actions in the workspace header or the relevant row.
 ## Credits
 
 [OpenLogi](https://github.com/AprilNEA/OpenLogi) inspired this project.
-The desktop layout takes inspiration from Prathamesh’s
+The device workspace uses OpenLogi’s control-and-inspector layout as its reference.
+The app shell takes inspiration from Prathamesh’s
 [shared index](https://github.com/quaylabshq/orka/pull/198) and
 [detail layouts](https://github.com/quaylabshq/orka/pull/72) for Orka.
