@@ -2108,6 +2108,7 @@ dependencies = [
  "directories",
  "eframe",
  "hidapi",
+ "image",
  "rusqlite",
  "serde",
  "serde_json",
