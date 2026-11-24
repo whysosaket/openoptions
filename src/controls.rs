@@ -1,3 +1,4 @@
+mod focus;
 mod hosts;
 mod profiles;
 pub use hosts::{Host, Hosts, host_channels, rename_host, switch_host};
@@ -99,6 +100,7 @@ pub fn supports(action: &Action) -> bool {
 
 pub enum Status {
     Active,
+    ActionFailed(String),
     Ring {
         actions: Box<Ring>,
         pointer: (i32, i32),
@@ -235,6 +237,7 @@ fn run(
         }
     }
     let mut effective = Bindings::new();
+    let mut ring_target = None;
     let mut planned = Vec::new();
     let mut app = None;
     let mut next_check = Instant::now();
@@ -242,16 +245,28 @@ fn run(
     let result = (|| {
         let mut pressed = BTreeMap::<u16, Press>::new();
         while !stop.load(Ordering::Relaxed) {
-            if let Ok(action) = chosen.try_recv()
-                && dispatch(
+            if let Ok(action) = chosen.try_recv() {
+                let target = ring_target.take();
+                let needs_focus = !matches!(
+                    action,
+                    Action::SwitchHost(_)
+                        | Action::OpenApplication(_)
+                        | Action::Named(crate::migration::NamedAction::NoAction)
+                );
+                if needs_focus && !target.is_some_and(focus::Target::restore) {
+                    let _ = status.send(Status::ActionFailed(
+                        "Could not return to the application that opened the Actions Ring.".into(),
+                    ));
+                } else if dispatch(
                     &mut hardware,
                     &mut input,
                     status,
                     &action,
                     &profiles.layer(app.as_deref()).ring,
-                )?
-            {
-                return Ok(());
+                    &mut ring_target,
+                )? {
+                    return Ok(());
+                }
             }
             if pressed.is_empty() && Instant::now() >= next_check {
                 next_check = Instant::now() + Duration::from_millis(160);
@@ -313,6 +328,7 @@ fn run(
                                     status,
                                     action,
                                     &profiles.layer(app.as_deref()).ring,
+                                    &mut ring_target,
                                 )?
                             {
                                 return Ok(());
@@ -382,11 +398,13 @@ fn dispatch(
     status: &mpsc::Sender<Status>,
     action: &Action,
     ring: &Ring,
+    ring_target: &mut Option<focus::Target>,
 ) -> Result<bool, String> {
     match action {
         Action::ShowActionsRing => {
             if ring.iter().any(Option::is_some) {
                 let pointer = input.location().map_err(|error| error.to_string())?;
+                *ring_target = focus::current();
                 let _ = status.send(Status::Ring {
                     actions: Box::new(ring.clone()),
                     pointer,

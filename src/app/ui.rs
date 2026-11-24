@@ -567,7 +567,11 @@ fn device_tile(ui: &mut Ui, device: &Device, width: f32) -> bool {
         rect.center_top() + egui::vec2(0., 88.),
         egui::Vec2::splat(107.),
     );
-    paint_icon(&painter, illustration, device_icon(device), MUTED);
+    if device.product_id == 0xB034 {
+        mx_master(&painter, illustration);
+    } else {
+        paint_icon(&painter, illustration, device_icon(device), MUTED);
+    }
     let details = rect.left_bottom() + egui::vec2(17., -61.);
     let mut name: String = device.name.chars().take(30).collect();
     if device.name.chars().count() > 30 {
@@ -590,6 +594,63 @@ fn device_tile(ui: &mut Ui, device: &Device, width: f32) -> bool {
     );
     paint_focus(ui, &response);
     response.on_hover_text(&device.name).clicked()
+}
+
+fn mx_master(painter: &egui::Painter, rect: egui::Rect) {
+    let center = rect.center();
+    let p = |x, y| center + egui::vec2(x, y) * (rect.height() / 100.);
+    let body = [
+        (-32., -29.),
+        (-23., -45.),
+        (-10., -50.),
+        (7., -50.),
+        (21., -45.),
+        (32., -35.),
+        (38., -19.),
+        (40., 0.),
+        (37., 19.),
+        (31., 34.),
+        (18., 44.),
+        (2., 49.),
+        (-14., 48.),
+        (-32., 40.),
+        (-44., 25.),
+        (-44., 12.),
+        (-38., -4.),
+        (-35., -17.),
+    ];
+    let fill = egui::Color32::from_rgb(47, 48, 54);
+    let edge = egui::Color32::from_rgb(76, 78, 85);
+    painter.add(egui::Shape::convex_polygon(
+        body.into_iter().map(|(x, y)| p(x, y)).collect(),
+        fill,
+        egui::Stroke::new(1.0_f32, edge),
+    ));
+    painter.add(egui::Shape::line(
+        vec![
+            p(-33., -10.),
+            p(-19., -6.),
+            p(-3., -3.),
+            p(18., -7.),
+            p(37., -15.),
+        ],
+        egui::Stroke::new(1.0_f32, edge),
+    ));
+    painter.line_segment(
+        [p(-4., -48.), p(-2., -3.)],
+        egui::Stroke::new(1.0_f32, edge),
+    );
+    let wheel = egui::Rect::from_two_pos(p(-9., -39.), p(3., -17.));
+    painter.rect_filled(wheel, 5, egui::Color32::from_gray(133));
+    for y in [-35., -31., -27., -23.] {
+        painter.line_segment([p(-7., y), p(1., y)], egui::Stroke::new(0.9_f32, fill));
+    }
+    painter.rect_filled(egui::Rect::from_two_pos(p(-7., -13.), p(1., -5.)), 3, edge);
+    painter.line_segment(
+        [p(-30., 7.), p(-35., 21.)],
+        egui::Stroke::new(2.0_f32, edge),
+    );
+    painter.circle_filled(p(-2., 5.), 1.2, egui::Color32::from_rgb(92, 156, 131));
 }
 
 fn device_icon(device: &Device) -> Icon {

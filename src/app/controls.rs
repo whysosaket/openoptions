@@ -59,6 +59,8 @@ pub(super) struct Editor {
     pub draft: Profiles,
     application: Option<String>,
     application_path: String,
+    adding_application: bool,
+    app_error: Option<String>,
     pub hosts: Option<Result<Option<Hosts>, String>>,
     pub host_busy: bool,
     host_rename: Option<(u8, String)>,
@@ -90,6 +92,8 @@ impl Default for Editor {
             draft: Profiles::default(),
             application: None,
             application_path: String::new(),
+            adding_application: false,
+            app_error: None,
             hosts: None,
             host_busy: false,
             host_rename: None,
@@ -195,6 +199,12 @@ impl OpenOptions {
         while let Some(status) = live.session.poll() {
             match status {
                 Status::Active => live.active = true,
+                Status::ActionFailed(error) => {
+                    if let Some(editor) = self.editors.get_mut(&live.key) {
+                        editor.notice = Some((error, true));
+                    }
+                }
+
                 Status::Ring { actions, pointer } => {
                     self.actions_ring =
                         Some(feature_panels::RingWindow::new(context, *actions, pointer));
@@ -1103,50 +1113,10 @@ fn profile_tabs(ui: &mut Ui, editor: &mut Editor, editable: bool) {
                     }
                 }
                 ui.add_enabled_ui(editable, |ui| {
-                    ui.menu_button("+ Add application", |ui| {
-                        ui.set_min_width(340.);
-                        let hint = if cfg!(target_os = "macos") {
-                            "Path to an installed .app"
-                        } else {
-                            "Path to the application executable"
-                        };
-                        ui.label(title("Add application", 15.));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.application_path)
-                                .hint_text(hint)
-                                .desired_width(360.),
-                        );
-                        #[cfg(target_os = "macos")]
-                        ComboBox::from_id_salt("installed-apps")
-                            .selected_text("Applications")
-                            .show_ui(ui, |ui| {
-                                for application in installed_mac_apps() {
-                                    let name = application
-                                        .file_stem()
-                                        .and_then(|name| name.to_str())
-                                        .unwrap_or_default();
-                                    if ui.button(name).clicked() {
-                                        editor.application_path =
-                                            application.to_string_lossy().into_owned();
-                                    }
-                                }
-                            });
-                        if ui
-                            .add_enabled(!editor.application_path.trim().is_empty(), primary("Add"))
-                            .clicked()
-                        {
-                            match editor.draft.add(&editor.application_path) {
-                                Ok(app) => {
-                                    editor.application = Some(app);
-                                    editor.application_path.clear();
-                                    editor.entry = None;
-                                    editor.notice = None;
-                                    ui.close();
-                                }
-                                Err(error) => editor.notice = Some((error, true)),
-                            }
-                        }
-                    });
+                    if ui.button("+ Add application").clicked() {
+                        editor.adding_application = true;
+                        editor.app_error = None;
+                    }
                     if let Some(app) = editor.application.clone() {
                         ui.menu_button("⋯", |ui| {
                             if ui.button("Remove application profile").clicked() {
@@ -1161,6 +1131,65 @@ fn profile_tabs(ui: &mut Ui, editor: &mut Editor, editable: bool) {
                 });
             });
         });
+    if editor.adding_application {
+        let response = egui::Modal::new(Id::new("add-application-profile"))
+            .frame(card().fill(SURFACE).inner_margin(20))
+            .show(ui.ctx(), |ui| {
+                ui.set_width(410.);
+                ui.label(title("Add application", 19.));
+                let hint = if cfg!(target_os = "macos") {
+                    "Path to an installed .app"
+                } else {
+                    "Path to the application executable"
+                };
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.application_path)
+                        .hint_text(hint)
+                        .desired_width(ui.available_width()),
+                );
+                #[cfg(target_os = "macos")]
+                ComboBox::from_id_salt("installed-apps")
+                    .selected_text("Installed applications")
+                    .show_ui(ui, |ui| {
+                        for app in installed_mac_apps() {
+                            let name = app
+                                .file_stem()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or_default();
+                            if ui.button(name).clicked() {
+                                editor.application_path = app.to_string_lossy().into_owned();
+                                ui.close();
+                            }
+                        }
+                    });
+                if let Some(error) = &editor.app_error {
+                    ui.label(RichText::new(error).color(WARNING));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(!editor.application_path.trim().is_empty(), primary("Add"))
+                        .clicked()
+                    {
+                        match editor.draft.add(&editor.application_path) {
+                            Ok(app) => {
+                                editor.application = Some(app);
+                                editor.application_path.clear();
+                                editor.entry = None;
+                                editor.notice = None;
+                                ui.close();
+                            }
+                            Err(error) => editor.app_error = Some(error),
+                        }
+                    }
+                });
+            });
+        if response.should_close() {
+            editor.adding_application = false;
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

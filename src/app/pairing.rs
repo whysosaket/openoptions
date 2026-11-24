@@ -1,3 +1,4 @@
+use super::controls::card;
 use super::{Event, OpenOptions, theme::*};
 use eframe::egui::{self, Button, Context, Id, RichText};
 use openoptions::{
@@ -78,7 +79,9 @@ impl Wizard {
     }
 
     fn show(&mut self, context: &Context) -> bool {
-        let response = egui::Modal::new(Id::new("add-device")).show(context, |ui| {
+        let response = egui::Modal::new(Id::new("add-device"))
+            .frame(card().fill(WINDOW).inner_margin(24))
+            .show(context, |ui| {
             let width = (context.content_rect().width() - 64.).clamp(260., 470.);
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 12.;
