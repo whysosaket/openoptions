@@ -1,7 +1,7 @@
 use super::Control;
 use crate::devices::{Device, with_hid};
-use hidapi::{BusType, HidDevice};
-use std::collections::{BTreeMap, BTreeSet};
+use hidapi::HidDevice;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 const LONG_REPORT: u8 = 0x11;
@@ -33,7 +33,7 @@ impl Controls {
         let mut controls = Self::connect(device)?;
         let feature = controls.call(0, 0, &REPROG_CONTROLS)?[0];
         if feature == 0 {
-            return Err("This device does not report programmable controls over HID++.".into());
+            return Ok(controls);
         }
         controls.feature = feature;
         let count = controls.call(feature, 0, &[])?[0];
@@ -50,45 +50,38 @@ impl Controls {
     }
 
     pub(super) fn connect(device: &Device) -> Result<Self, String> {
+        if !device.connected {
+            return Err("The selected device is disconnected.".into());
+        }
         if let Some(link) = &device.receiver {
             let (handle, alternate) = link.open(device.product_id)?;
             return Ok(Self::new(handle, alternate, link.slot));
         }
-        if matches!(device.product_id, 0xC548 | 0xC52B | 0xC532) {
-            return Err("Open a paired peripheral to configure its controls.".into());
+        if !device.supports_hidpp() {
+            return Err("No direct HID++ interface is available for this device.".into());
         }
+        let unit = device.direct_unit();
         let device = device.clone();
-        let handle = with_hid(move |api| {
-            let paths = api
-                .device_list()
-                .filter(|info| {
-                    info.vendor_id() == 0x046D
-                        && info.product_id() == device.product_id
-                        && matches!(
-                            (device.connection, info.bus_type()),
-                            ("Bluetooth", BusType::Bluetooth) | ("USB", BusType::Usb)
-                        )
-                        && matches!(
-                            (info.usage_page(), info.usage()),
-                            (0xFF00, 0x0002) | (0xFF43, 0x0202 | 0x0602 | 0x1A02)
-                        )
-                })
-                .map(|info| info.path())
-                .collect::<BTreeSet<_>>();
-            let path = match paths.len() {
-            0 => return Err("No direct HID++ controls interface is available for this device.".into()),
-            1 => *paths.first().unwrap(),
-            _ => return Err("More than one matching HID++ interface is connected. Disconnect the other device before configuring controls.".into()),
-        };
-            api.open_path(path)
-            .map_err(|error| {
-                if cfg!(target_os = "macos") && error.to_string().contains("0xE00002E2") {
-                    return "Allow OpenOptions in System Settings → Privacy & Security → Input Monitoring, then reopen OpenOptions.".into();
-                }
-                format!("Could not open the controls interface. {error}")
-            })
-        })?;
-        Ok(Self::new(handle, None, DIRECT))
+        let handle = with_hid(move |api| device.open_direct(api))?;
+        let channel = Self::new(handle, None, DIRECT);
+        if let Some(unit) = unit
+            && channel.unit_id()? != Some(unit)
+        {
+            return Err(
+                "The HID++ interface now belongs to another device. Refresh Devices.".into(),
+            );
+        }
+        Ok(channel)
+    }
+
+    pub(super) fn unit_id(&self) -> Result<Option<[u8; 4]>, String> {
+        let feature = self.call(0, 0, &[0, 3])?[0];
+        if feature == 0 {
+            return Ok(None);
+        }
+        let reply = self.call(feature, 0, &[])?;
+        let unit: [u8; 4] = reply[1..5].try_into().expect("fixed unit ID field");
+        Ok((unit != [0; 4] && unit != [0xFF; 4]).then_some(unit))
     }
 
     fn new(handle: HidDevice, alternate: Option<HidDevice>, target: u8) -> Self {

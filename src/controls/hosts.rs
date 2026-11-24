@@ -17,6 +17,9 @@ pub struct Host {
 }
 
 pub fn host_channels(device: &Device) -> Result<Option<Hosts>, String> {
+    if !device.supports_hidpp() {
+        return Ok(None);
+    }
     read_hosts(&Controls::connect(device)?).map(|result| result.map(|(_, hosts)| hosts))
 }
 
@@ -107,6 +110,7 @@ fn read_name(channel: &Controls, feature: u8, host: u8, length: u8) -> Result<St
 }
 
 pub fn rename_host(device: &Device, host: u8, name: &str) -> Result<Option<Hosts>, String> {
+    device.require_verified_identity()?;
     let channel = Controls::connect(device)?;
     let (feature, hosts) = read_hosts(&channel)?.ok_or("Easy-Switch is unavailable.")?;
     let slot = hosts
@@ -158,6 +162,7 @@ pub fn rename_host(device: &Device, host: u8, name: &str) -> Result<Option<Hosts
 }
 
 pub fn switch_host(device: &Device, host: u8) -> Result<(), String> {
+    device.require_verified_identity()?;
     switch_on_channel(&Controls::connect(device)?, host)
 }
 

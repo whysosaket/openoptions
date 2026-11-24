@@ -1,15 +1,20 @@
 use super::controls::card;
-use super::{Event, OpenOptions, theme::*};
+use super::{OpenOptions, theme::*};
 use eframe::egui::{self, Button, Context, Id, RichText};
 use openoptions::{
-    devices,
+    devices::{self, Device, DeviceKey},
     pairing::{self, Passkey, ReceiverDevice},
 };
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
+};
 
 #[derive(Default)]
 pub(super) struct Wizard {
     pub receivers: Option<Result<Vec<ReceiverDevice>, String>>,
+    receiver_scan: Option<Receiver<Result<Vec<ReceiverDevice>, String>>>,
     connection: Option<ReceiverDevice>,
     session: Option<pairing::Pairing>,
     candidates: BTreeMap<u16, String>,
@@ -19,41 +24,68 @@ pub(super) struct Wizard {
     paired: Option<u8>,
     cancelling: bool,
     error: Option<String>,
+    bluetooth: Option<BluetoothPairing>,
+}
+
+struct BluetoothPairing {
+    starting_devices: BTreeSet<DeviceKey>,
+    found: Option<String>,
+    next_scan: Instant,
+    deadline: Instant,
 }
 
 impl Wizard {
     fn poll(&mut self, context: &Context) -> bool {
-        let Some(session) = &self.session else {
-            return false;
-        };
-        let mut paired = false;
-        while let Some(event) = session.poll() {
-            match event {
-                pairing::Event::Searching => self.searching = true,
-                pairing::Event::Found { id, name } => {
-                    self.candidates.insert(id, name);
+        if let Some(receiver_scan) = &self.receiver_scan {
+            match receiver_scan.try_recv() {
+                Ok(result) => {
+                    self.receivers = Some(result);
+                    self.receiver_scan = None;
                 }
-                pairing::Event::Confirm(passkey) => self.passkey = Some(passkey),
-                pairing::Event::Paired(slot) => {
-                    self.paired = Some(slot);
-                    paired = true;
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.receivers = Some(Err("Receiver discovery stopped unexpectedly.".into()));
+                    self.receiver_scan = None;
                 }
-                pairing::Event::Finished(result) => {
-                    self.session = None;
-                    self.cancelling = false;
-                    self.error = result.err();
-                    if self.paired.is_none() && self.error.is_none() {
-                        self.connection = None;
-                        self.candidates.clear();
-                        self.selected = None;
-                        self.passkey = None;
-                    }
-                    return paired;
-                }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        context.request_repaint_after(Duration::from_millis(85));
-        paired
+        while let Some(event) = self.session.as_ref().and_then(pairing::Pairing::poll) {
+            if self.accept(event) {
+                return true;
+            }
+        }
+        if self.session.is_some() {
+            context.request_repaint_after(Duration::from_millis(85));
+        }
+        false
+    }
+
+    fn accept(&mut self, event: pairing::Event) -> bool {
+        if let pairing::Event::Finished(result) = event {
+            self.session = None;
+            self.error = result.err();
+            if std::mem::take(&mut self.cancelling) {
+                self.connection = None;
+                self.paired = None;
+                self.candidates.clear();
+                self.selected = None;
+                self.passkey = None;
+            }
+            return self.paired.is_some();
+        }
+        if self.cancelling {
+            return false;
+        }
+        match event {
+            pairing::Event::Searching => self.searching = true,
+            pairing::Event::Found { id, name } => {
+                self.candidates.insert(id, name);
+            }
+            pairing::Event::Confirm(passkey) => self.passkey = Some(passkey),
+            pairing::Event::Paired(slot) => self.paired = Some(slot),
+            pairing::Event::Finished(_) => unreachable!(),
+        }
+        false
     }
 
     fn start(&mut self, receiver: ReceiverDevice, context: &Context) {
@@ -71,6 +103,7 @@ impl Wizard {
     fn cancel(&mut self) -> bool {
         if let Some(session) = &self.session {
             self.cancelling = true;
+            self.paired = None;
             session.cancel();
             false
         } else {
@@ -78,7 +111,43 @@ impl Wizard {
         }
     }
 
-    fn show(&mut self, context: &Context) -> bool {
+    fn check_bluetooth(
+        &mut self,
+        context: &Context,
+        devices: &Result<Vec<Device>, String>,
+        scanning: bool,
+    ) -> bool {
+        let Some(search) = &mut self.bluetooth else {
+            return false;
+        };
+        if search.found.is_some() {
+            return false;
+        }
+        if let Ok(devices) = devices
+            && let Some(device) = devices.iter().find(|device| {
+                device.connected
+                    && device.connection == "Bluetooth"
+                    && !search.starting_devices.contains(&device.key())
+            })
+        {
+            search.found = Some(device.name.clone());
+            return false;
+        }
+        let now = Instant::now();
+        if now >= search.deadline {
+            self.bluetooth = None;
+            self.error = Some("No new Bluetooth device appeared. Finish pairing in system settings and try again.".into());
+            return false;
+        }
+        context.request_repaint_after(Duration::from_secs(1));
+        if scanning || now < search.next_scan {
+            return false;
+        }
+        search.next_scan = now + Duration::from_secs(3);
+        true
+    }
+
+    fn show(&mut self, context: &Context, inventory: &Result<Vec<Device>, String>) -> bool {
         let response = egui::Modal::new(Id::new("add-device"))
             .frame(card().fill(WINDOW).inner_margin(24))
             .show(context, |ui| {
@@ -86,6 +155,22 @@ impl Wizard {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 12.;
             ui.label(title("Add Device", 23.));
+            if let Some(bluetooth) = &self.bluetooth {
+                if let Some(name) = &bluetooth.found {
+                    ui.label(title("Device connected", 17.));
+                    ui.label(name);
+                    if ui.add(primary("Done")).clicked() {
+                        ui.close();
+                    }
+                } else {
+                    ui.spinner();
+                    ui.label(muted("Finish pairing in system Bluetooth settings. OpenOptions will look for the new device here."));
+                    if ui.button("Cancel").clicked() {
+                        ui.close();
+                    }
+                }
+                return;
+            }
             if let Some(slot) = self.paired {
                 ui.label(title("Device paired", 17.));
                 ui.label(muted(format!("Connected to receiver slot {slot}.")));
@@ -177,9 +262,27 @@ impl Wizard {
                 }
                 ui.separator();
                 if ui.button("Use Bluetooth settings").clicked() {
-                    match devices::open_bluetooth_settings() {
-                        Ok(()) => ui.close(),
-                        Err(error) => self.error = Some(error),
+                    match inventory {
+                        Ok(devices) => match devices::open_bluetooth_settings() {
+                            Ok(()) => {
+                                let now = Instant::now();
+                                self.error = None;
+                                self.bluetooth = Some(BluetoothPairing {
+                                    starting_devices: devices.iter()
+                                        .filter(|device| device.connected)
+                                        .map(Device::key)
+                                        .collect(),
+                                    found: None,
+                                    next_scan: now,
+                                    deadline: now + Duration::from_secs(120),
+                                });
+                                context.request_repaint();
+                            }
+                            Err(error) => self.error = Some(error),
+                        },
+                        Err(_) => {
+                            self.error = Some("Refresh the Devices list before starting Bluetooth pairing.".into());
+                        }
                     }
                 }
             }
@@ -194,20 +297,55 @@ impl Wizard {
 
 impl OpenOptions {
     pub(super) fn open_pairing(&mut self, context: &Context) {
-        self.pairing = Some(Wizard::default());
-        self.job(context, || Event::ReceiversLoaded(pairing::receivers()));
+        let (send, receiver_scan) = mpsc::channel();
+        self.pairing = Some(Wizard {
+            receiver_scan: Some(receiver_scan),
+            ..Wizard::default()
+        });
+        let context = context.clone();
+        std::thread::spawn(move || {
+            let _ = send.send(pairing::receivers());
+            context.request_repaint();
+        });
     }
 
     pub(super) fn show_pairing(&mut self, context: &Context) {
         let Some(wizard) = &mut self.pairing else {
             return;
         };
-        let refresh = wizard.poll(context);
-        if wizard.show(context) {
+        let refresh =
+            wizard.poll(context) | wizard.check_bluetooth(context, &self.devices, self.scanning);
+        if wizard.show(context, &self.devices) {
             self.pairing = None;
         }
         if refresh {
             self.scan(context);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelling_ignores_late_receiver_results_and_waits_for_cleanup() {
+        let mut wizard = Wizard {
+            cancelling: true,
+            ..Wizard::default()
+        };
+        assert!(!wizard.accept(pairing::Event::Found {
+            id: 3,
+            name: "Late device".into(),
+        }));
+        assert!(!wizard.accept(pairing::Event::Paired(2)));
+        assert!(wizard.cancelling);
+        assert!(wizard.candidates.is_empty());
+        assert!(wizard.paired.is_none());
+        assert!(!wizard.accept(pairing::Event::Finished(Ok(()))));
+        assert!(!wizard.cancelling);
+        assert!(!wizard.accept(pairing::Event::Paired(1)));
+        assert!(wizard.accept(pairing::Event::Finished(Ok(()))));
+        assert_eq!(wizard.paired, Some(1));
     }
 }

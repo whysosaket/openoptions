@@ -2,11 +2,15 @@ use crate::migration::{Action, NamedAction::*};
 use enigo::{Button, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use std::{path::Path, process::Command, thread};
 
-pub(super) fn connect() -> Result<Enigo, String> {
-    if cfg!(target_os = "linux")
-        && (std::env::var("XDG_SESSION_TYPE").is_ok_and(|kind| kind == "wayland")
+pub(super) fn live_platform_available() -> bool {
+    !cfg!(target_os = "linux")
+        || !(std::env::var("XDG_SESSION_TYPE").is_ok_and(|kind| kind == "wayland")
             || std::env::var_os("WAYLAND_DISPLAY").is_some())
-    {
+            && std::env::var_os("DISPLAY").is_some()
+}
+
+pub(super) fn connect() -> Result<Enigo, String> {
+    if !live_platform_available() {
         return Err("Live assignments on Linux require an X11 session.".into());
     }
     Enigo::new(&Settings::default()).map_err(|error| {

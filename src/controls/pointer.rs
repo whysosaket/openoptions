@@ -5,6 +5,8 @@ use crate::{devices::Device, migration::WheelMode};
 pub struct Pointer {
     pub dpi: Option<Dpi>,
     pub wheel: Option<Wheel>,
+    pub dpi_error: Option<String>,
+    pub wheel_error: Option<String>,
 }
 
 pub struct Dpi {
@@ -25,28 +27,37 @@ pub enum PointerChange {
 }
 
 pub fn pointer(device: &Device) -> Result<Pointer, String> {
+    if !device.supports_hidpp() {
+        return Ok(Pointer::default());
+    }
     let channel = Controls::connect(device)?;
-    Ok(Pointer {
-        dpi: dpi(&channel)?.map(|(_, state)| state),
-        wheel: wheel(&channel)?.map(|(_, state)| state),
-    })
+    Ok(pointer_reading(
+        dpi(&channel).map(|value| value.map(|(_, state)| state)),
+        wheel(&channel).map(|value| value.map(|(_, state)| state)),
+    ))
 }
 
 pub fn apply_pointer(device: &Device, change: PointerChange) -> Result<Pointer, String> {
+    device.require_verified_identity()?;
     let channel = Controls::connect(device)?;
-    match change {
+    let reading = match change {
         PointerChange::Dpi(value) => {
-            let (feature, options) = dpi(&channel)?.ok_or("Adjustable DPI is unavailable.")?;
+            let (feature, mut options) = dpi(&channel)?.ok_or("Adjustable DPI is unavailable.")?;
             if !options.supported.contains(&value) {
                 return Err("This sensor does not support that DPI.".into());
             }
             let [high, low] = value.to_be_bytes();
             channel.call(feature, 3, &[0, high, low])?;
-            if read_dpi(&channel, feature)? != value {
+            options.current = read_dpi(&channel, feature)?;
+            if options.current != value {
                 return Err(
                     "The device did not apply the DPI. Reload its current settings.".into(),
                 );
             }
+            pointer_reading(
+                Ok(Some(options)),
+                wheel(&channel).map(|value| value.map(|(_, state)| state)),
+            )
         }
         PointerChange::Wheel(value) => {
             let (feature, _) = wheel(&channel)?.ok_or("SmartShift is unavailable.")?;
@@ -69,12 +80,33 @@ pub fn apply_pointer(device: &Device, change: PointerChange) -> Result<Pointer, 
                         .into(),
                 );
             }
+            pointer_reading(
+                dpi(&channel).map(|value| value.map(|(_, state)| state)),
+                Ok(Some(actual)),
+            )
         }
+    };
+    Ok(reading)
+}
+
+fn pointer_reading(
+    dpi: Result<Option<Dpi>, String>,
+    wheel: Result<Option<Wheel>, String>,
+) -> Pointer {
+    let (dpi, dpi_error) = match dpi {
+        Ok(dpi) => (dpi, None),
+        Err(error) => (None, Some(error)),
+    };
+    let (wheel, wheel_error) = match wheel {
+        Ok(wheel) => (wheel, None),
+        Err(error) => (None, Some(error)),
+    };
+    Pointer {
+        dpi,
+        wheel,
+        dpi_error,
+        wheel_error,
     }
-    Ok(Pointer {
-        dpi: dpi(&channel)?.map(|(_, state)| state),
-        wheel: wheel(&channel)?.map(|(_, state)| state),
-    })
 }
 
 fn dpi(channel: &Controls) -> Result<Option<(u8, Dpi)>, String> {

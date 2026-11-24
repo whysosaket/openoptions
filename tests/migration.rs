@@ -246,4 +246,22 @@ fn legacy_control_rows_keep_their_defaults_when_adding_a_profile_and_ring() {
         saved.effective_bindings(Some("/unrelated"))[&195],
         Binding::Click(Action::Named(NamedAction::Copy))
     );
+    let mut inherited = saved;
+    inherited
+        .layer_mut(Some("/example/editor"))
+        .bindings
+        .remove(&195);
+    Store::open(&path)
+        .unwrap()
+        .save_customizations(&device, &inherited)
+        .unwrap();
+    let reopened = Store::open(&path).unwrap().customizations(&device).unwrap();
+    assert_eq!(
+        reopened.effective_bindings(Some("/example/editor"))[&195],
+        Binding::Click(Action::Named(NamedAction::Copy))
+    );
+    assert_eq!(
+        reopened.layer(Some("/example/editor")).ring[0],
+        Some(Action::Shortcut("Ctrl+F".into()))
+    );
 }

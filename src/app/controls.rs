@@ -18,12 +18,6 @@ use openoptions::migration::{
 use openoptions::store::Store;
 use std::{collections::BTreeMap, time::Duration};
 
-pub(super) type DeviceKey = (&'static str, u16, Option<[u8; 4]>);
-
-fn device_key(device: &Device) -> DeviceKey {
-    (device.connection, device.product_id, device.unit_id())
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Buttons,
@@ -54,7 +48,10 @@ impl Section {
 }
 
 pub(super) struct Editor {
-    pub available: Option<Result<Vec<Control>, String>>,
+    pub loading: bool,
+    pub reload_requested: bool,
+    pub available: Option<Vec<Control>>,
+    pub controls_error: Option<String>,
     pub saved: Result<Profiles, String>,
     pub draft: Profiles,
     application: Option<String>,
@@ -69,6 +66,7 @@ pub(super) struct Editor {
     ring_preview: bool,
     pub saving: bool,
     pub pointer: Option<Pointer>,
+    pub pointer_error: Option<String>,
     pub pointer_busy: bool,
     dpi_choice: Option<u16>,
     wheel_choice: Option<Wheel>,
@@ -87,7 +85,10 @@ pub(super) struct ActionEntry {
 impl Default for Editor {
     fn default() -> Self {
         Self {
+            loading: false,
+            reload_requested: false,
             available: None,
+            controls_error: None,
             saved: Ok(Profiles::default()),
             draft: Profiles::default(),
             application: None,
@@ -102,6 +103,7 @@ impl Default for Editor {
             ring_preview: false,
             saving: false,
             pointer: None,
+            pointer_error: None,
             pointer_busy: false,
             dpi_choice: None,
             wheel_choice: None,
@@ -115,27 +117,89 @@ impl Default for Editor {
 }
 
 impl Editor {
-    pub fn loaded(
-        &mut self,
-        available: Result<Vec<Control>, String>,
-        saved: Result<Profiles, String>,
-    ) {
-        if available.as_ref().is_ok_and(|values| {
-            !values.iter().any(|control| control.mouse)
-                && values.iter().any(|control| !control.mouse)
-        }) {
-            self.section = Section::Keys;
-        }
-        if let Ok(bindings) = &saved {
-            self.draft = bindings.clone();
-        }
-        self.available = Some(available);
-        self.saved = saved;
+    fn busy(&self) -> bool {
+        self.loading || self.saving || self.pointer_busy || self.host_busy
     }
 
-    pub fn pointer_loaded(&mut self, pointer: Pointer) {
-        self.dpi_choice = pointer.dpi.as_ref().map(|dpi| dpi.current);
-        self.wheel_choice = pointer.wheel;
+    pub fn loaded(
+        &mut self,
+        available: Option<Result<Vec<Control>, String>>,
+        saved: Option<Result<Profiles, String>>,
+    ) {
+        self.loading = false;
+        if let Some(Err(error)) = &available {
+            self.controls_error = Some(error.clone());
+        }
+        if let Some(Ok(available)) = available {
+            self.controls_error = None;
+            if self.section == Section::Buttons
+                && self.selected.is_none()
+                && !available.is_empty()
+                && available.iter().all(|control| !control.mouse)
+            {
+                self.section = Section::Keys;
+            }
+            self.available = Some(available);
+        }
+        if let Some(saved) = saved {
+            if let Ok(bindings) = &saved {
+                self.draft = bindings.clone();
+            }
+            self.saved = saved;
+        }
+    }
+
+    pub fn pointer_loaded(&mut self, result: Result<Pointer, String>, applied: Option<Tuning>) {
+        let mut pointer = match result {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                self.pointer_error = Some(error);
+                return;
+            }
+        };
+        self.pointer_error = None;
+        let mut previous = self.pointer.take().unwrap_or_default();
+        if pointer.dpi_error.is_some() {
+            pointer.dpi = previous.dpi.take();
+        }
+        if pointer.wheel_error.is_some() {
+            pointer.wheel = previous.wheel;
+        }
+        let previous = &previous;
+        if pointer.dpi_error.is_none() {
+            self.dpi_choice = pointer.dpi.as_ref().map(|dpi| {
+                if applied != Some(Tuning::Dpi)
+                    && let Some(choice) = self.dpi_choice
+                    && previous
+                        .dpi
+                        .as_ref()
+                        .is_some_and(|old| old.current != choice)
+                    && dpi.supported.contains(&choice)
+                {
+                    choice
+                } else {
+                    dpi.current
+                }
+            });
+        }
+        if pointer.wheel_error.is_none() {
+            self.wheel_choice = pointer.wheel.map(|wheel| {
+                if applied != Some(Tuning::Wheel)
+                    && let Some(choice) = self.wheel_choice
+                    && previous.wheel.is_some_and(|old| {
+                        old.mode != choice.mode || old.threshold != choice.threshold
+                    })
+                {
+                    Wheel {
+                        mode: choice.mode,
+                        threshold: choice.threshold,
+                        ..wheel
+                    }
+                } else {
+                    wheel
+                }
+            });
+        }
         self.pointer = Some(pointer);
     }
 
@@ -153,11 +217,18 @@ impl Editor {
 }
 
 pub(super) struct LiveControls {
-    pub key: DeviceKey,
+    pub key: openoptions::devices::DeviceKey,
     pub name: String,
     pub session: Session,
     pub active: bool,
     pub stopping: bool,
+    active_application: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tuning {
+    Dpi,
+    Wheel,
 }
 
 enum Command {
@@ -172,23 +243,30 @@ enum Command {
 
 impl OpenOptions {
     pub(super) fn open_device(&mut self, device: Device, context: &egui::Context) {
-        if !self.editors.contains_key(&device_key(&device)) {
+        if !self.editors.contains_key(&device.key()) {
             self.load_controls(device.clone(), context);
         }
         self.detail = Some(super::Detail::Device(device));
     }
 
     fn load_controls(&mut self, device: Device, context: &egui::Context) {
-        let key = device_key(&device);
-        self.editors.insert(key, Editor::default());
+        let key = device.key();
+        let editor = self.editors.entry(key.clone()).or_default();
+        editor.loading = true;
+        editor.reload_requested = false;
+        let read_saved = editor.available.is_none() || editor.saved.is_err();
         self.job(context, move || {
-            let available = controls::discover(&device);
-            let saved = Store::location()
-                .and_then(|path| Store::open(&path))
-                .and_then(|store| store.customizations(&device));
-            let pointer = controls::pointer(&device).ok();
-            let hosts = controls::host_channels(&device);
-            Event::ControlsLoaded(key, available, saved, pointer, hosts)
+            let saved = read_saved.then(|| {
+                Store::location()
+                    .and_then(|path| Store::open(&path))
+                    .and_then(|store| store.customizations(&device))
+            });
+            let hardware = device.connected.then(|| super::DeviceSettings {
+                available: controls::discover(&device),
+                pointer: controls::pointer(&device),
+                hosts: controls::host_channels(&device),
+            });
+            Event::ControlsLoaded(key, hardware, saved)
         });
     }
 
@@ -199,6 +277,7 @@ impl OpenOptions {
         while let Some(status) = live.session.poll() {
             match status {
                 Status::Active => live.active = true,
+                Status::ProfileChanged(application) => live.active_application = application,
                 Status::ActionFailed(error) => {
                     if let Some(editor) = self.editors.get_mut(&live.key) {
                         editor.notice = Some((error, true));
@@ -206,8 +285,10 @@ impl OpenOptions {
                 }
 
                 Status::Ring { actions, pointer } => {
-                    self.actions_ring =
-                        Some(feature_panels::RingWindow::new(context, *actions, pointer));
+                    if !live.stopping {
+                        self.actions_ring =
+                            Some(feature_panels::RingWindow::new(context, *actions, pointer));
+                    }
                 }
                 Status::Finished(result) => {
                     if let Some(editor) = self.editors.get_mut(&live.key) {
@@ -228,21 +309,38 @@ impl OpenOptions {
     pub(super) fn stop_controls(&mut self) {
         if let Some(live) = &mut self.live_controls {
             live.stopping = true;
+            self.actions_ring = None;
             live.session.stop();
         }
     }
 
     pub(super) fn device_settings(&mut self, ui: &mut Ui, device: &Device) {
-        let key = device_key(device);
-        let online = self
-            .devices
-            .as_ref()
-            .is_ok_and(|devices| devices.iter().any(|current| device_key(current) == key));
+        let key = device.key();
+        let online = self.devices.is_ok() && device.connected;
+        if online
+            && self
+                .editors
+                .get(&key)
+                .is_some_and(|editor| editor.reload_requested && !editor.busy())
+            && self
+                .live_controls
+                .as_ref()
+                .is_none_or(|live| live.key != key)
+        {
+            self.load_controls(device.clone(), ui.ctx());
+        }
         let Some(editor) = self.editors.get_mut(&key) else {
             return;
         };
-        let live = self.live_controls.as_ref();
-        let command = settings_workspace(ui, editor, device, online, &self.profiles, live);
+        let command = settings_workspace(
+            ui,
+            editor,
+            device,
+            online,
+            self.devices.is_err(),
+            &self.profiles,
+            self.live_controls.as_ref(),
+        );
         match command {
             Some(Command::Reload) => self.load_controls(device.clone(), ui.ctx()),
             Some(Command::Save) => {
@@ -263,9 +361,17 @@ impl OpenOptions {
                 self.live_controls = Some(LiveControls {
                     key,
                     name: device.name.clone(),
-                    session: Session::start(device.clone(), editor.draft.clone()),
+                    session: Session::start(
+                        device.clone(),
+                        editor
+                            .saved
+                            .as_ref()
+                            .expect("enable requires saved profiles")
+                            .clone(),
+                    ),
                     active: false,
                     stopping: false,
+                    active_application: None,
                 });
                 ui.ctx().request_repaint_after(Duration::from_millis(85));
             }
@@ -273,8 +379,12 @@ impl OpenOptions {
                 editor.pointer_busy = true;
                 editor.notice = None;
                 let device = device.clone();
+                let tuning = match change {
+                    PointerChange::Dpi(_) => Tuning::Dpi,
+                    PointerChange::Wheel(_) => Tuning::Wheel,
+                };
                 self.job(ui.ctx(), move || {
-                    Event::PointerApplied(key, controls::apply_pointer(&device, change))
+                    Event::PointerApplied(key, tuning, controls::apply_pointer(&device, change))
                 });
             }
             Some(Command::ReloadHosts) => {
@@ -308,22 +418,23 @@ fn settings_workspace(
     editor: &mut Editor,
     device: &Device,
     online: bool,
+    scan_failed: bool,
     profiles: &Saved,
     live: Option<&LiveControls>,
 ) -> Option<Command> {
     let mut command = None;
     ui.visuals_mut().selection.stroke.color = TEXT;
-    let owns_session = live.is_some_and(|session| session.key == device_key(device));
-    let editable = !owns_session && !editor.saving && editor.saved.is_ok();
-    let available = match &editor.available {
-        Some(Ok(controls)) => controls.clone(),
-        Some(Err(_)) => controls::known_controls(device),
-        None => Vec::new(),
-    };
-    let pointer_supported = editor
-        .pointer
-        .as_ref()
-        .is_some_and(|pointer| pointer.dpi.is_some() || pointer.wheel.is_some());
+    let owns_session = live.is_some_and(|session| session.key == device.key());
+    let idle = !owns_session && !editor.busy();
+    let stable = device.verifies_identity();
+    let editable = idle && stable && editor.saved.is_ok();
+    let available = editor.available.clone().unwrap_or_default();
+    let pointer_supported = editor.pointer.as_ref().is_some_and(|pointer| {
+        pointer.dpi.is_some()
+            || pointer.wheel.is_some()
+            || pointer.dpi_error.is_some()
+            || pointer.wheel_error.is_some()
+    });
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
             vec2(154., ui.available_height()),
@@ -343,7 +454,7 @@ fn settings_workspace(
                         }
                         Section::Keys => available.iter().any(|control| !control.mouse),
                         Section::Ring => !available.is_empty(),
-                        Section::Pointer => pointer_supported,
+                        Section::Pointer => pointer_supported || editor.section == Section::Pointer,
                         Section::Device => true,
                     };
                     if !show {
@@ -368,6 +479,18 @@ fn settings_workspace(
         ui.add_space(12.);
         ui.vertical(|ui| {
             ui.set_width(ui.available_width());
+            if !online && editor.section != Section::Device {
+                ui.label(muted(if scan_failed {
+                    "Connection status unavailable. Return to Devices to retry the scan."
+                } else {
+                    "Device disconnected."
+                }));
+            }
+            if device.supports_hidpp() && !stable {
+                ui.label(muted(
+                    "The device has no verified identity. Settings are read-only.",
+                ));
+            }
             if let Some((notice, error)) = &editor.notice {
                 ui.label(RichText::new(notice).size(12.).color(if *error {
                     WARNING
@@ -379,7 +502,13 @@ fn settings_workspace(
                 ui.label(title("Connection", 20.));
                 workspace::badge(
                     ui,
-                    if online { "Connected" } else { "Disconnected" },
+                    if online {
+                        "Connected"
+                    } else if scan_failed {
+                        "Status unavailable"
+                    } else {
+                        "Disconnected"
+                    },
                     online,
                 );
                 ui.label(muted(format!(
@@ -387,14 +516,54 @@ fn settings_workspace(
                     device.connection, device.product_id
                 )));
                 ui.label(muted(format!("{} HID interfaces", device.interfaces)));
-                command = host_workspace(ui, editor, online && live.is_none());
+                match &device.battery {
+                    Ok(Some(battery)) => {
+                        ui.label(muted(super::ui::battery_caption(*battery)));
+                    }
+                    Err(error) if online => {
+                        ui.label(muted(format!("Couldn't read battery. {error}")));
+                    }
+                    _ => {}
+                }
+                if editor.loading {
+                    ui.spinner();
+                }
+                if let Some(error) = &editor.pointer_error
+                    && ui
+                        .collapsing("Point & Scroll read error", |ui| {
+                            ui.label(muted(error));
+                            labeled_button(ui, "Try again", Icon::Refresh, online && idle).clicked()
+                        })
+                        .body_returned
+                        == Some(true)
+                {
+                    command = Some(Command::Reload);
+                    return;
+                }
+                command = host_workspace(ui, editor, online && stable && idle && live.is_none());
                 return;
             }
             if editor.section == Section::Pointer {
-                command = pointer_workspace(ui, editor, online && !owns_session);
+                command = pointer_workspace(ui, editor, online && stable && idle, online && idle);
                 return;
             }
+            if let Some(error) = &editor.controls_error {
+                if available.is_empty() {
+                    ui.label(title("Controls unavailable", 20.));
+                }
+                ui.label(muted(error));
+                if ui
+                    .add_enabled(online && idle, Button::new("Try again"))
+                    .clicked()
+                {
+                    command = Some(Command::Reload);
+                }
+                if available.is_empty() {
+                    return;
+                }
+            }
             match &editor.available {
+                None if !online && !editor.loading => return,
                 None => {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -402,19 +571,11 @@ fn settings_workspace(
                     });
                     return;
                 }
-                Some(Ok(_)) if available.is_empty() => {
+                Some(_) if available.is_empty() => {
                     ui.label(title("No configurable controls", 20.));
                     ui.label(muted(
                         "The device did not report any controls available for remapping.",
                     ));
-                    return;
-                }
-                Some(Err(error)) if available.is_empty() => {
-                    ui.label(title("Controls unavailable", 20.));
-                    ui.label(muted(error));
-                    if ui.button("Try again").clicked() {
-                        command = Some(Command::Reload);
-                    }
                     return;
                 }
                 Some(_) => {}
@@ -423,7 +584,7 @@ fn settings_workspace(
                 ui.label(
                     RichText::new(format!("Could not read assignments. {error}")).color(WARNING),
                 );
-                if ui.button("Try again").clicked() {
+                if ui.add_enabled(idle, Button::new("Try again")).clicked() {
                     command = Some(Command::Reload);
                 }
                 return;
@@ -439,6 +600,14 @@ fn settings_workspace(
                         "Enabling…"
                     };
                     workspace::badge(ui, text, live.active && !live.stopping);
+                    if live.active && !live.stopping {
+                        let name = live
+                            .active_application
+                            .as_ref()
+                            .and_then(|key| editor.draft.applications.get(key))
+                            .map_or("Default", |profile| profile.name.as_str());
+                        ui.label(muted(format!("Active profile · {name}")));
+                    }
                 }
             });
             let instruction = match editor.section {
@@ -461,7 +630,8 @@ fn settings_workspace(
                             editable
                                 && online
                                 && live.is_none()
-                                && !editor.pointer_busy
+                                && controls::live_platform_available()
+                                && editor.controls_error.is_none()
                                 && editor.draft.has_bindings()
                                 && !editor.changed(),
                             Button::new("Enable live controls"),
@@ -473,12 +643,12 @@ fn settings_workspace(
                 {
                     command = Some(Command::Enable);
                 }
-                if editor.saving {
+                if editor.saving || editor.loading {
                     ui.spinner();
                 }
             });
-            if let Some(Err(error)) = &editor.available {
-                ui.label(muted(error).size(12.));
+            if !controls::live_platform_available() {
+                ui.label(muted("Live controls require an X11 session on Linux."));
             }
             profile_tabs(ui, editor, editable);
             if editor.section == Section::Ring {
@@ -487,7 +657,7 @@ fn settings_workspace(
             }
             let control_area = ui.available_height().max(100.);
             ScrollArea::vertical()
-                .id_salt(("control-settings", device_key(device)))
+                .id_salt(("control-settings", device.key()))
                 .max_height(control_area)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -521,24 +691,44 @@ fn settings_workspace(
     command
 }
 
-fn pointer_workspace(ui: &mut Ui, editor: &mut Editor, editable: bool) -> Option<Command> {
-    let pointer = editor.pointer.as_ref()?;
+fn pointer_workspace(
+    ui: &mut Ui,
+    editor: &mut Editor,
+    editable: bool,
+    retry: bool,
+) -> Option<Command> {
     let mut command = None;
     ui.label(title("Point & Scroll", 23.));
-    if editor.pointer_busy {
+    if editor.pointer_busy || editor.loading {
         ui.spinner();
     }
+    if let Some(error) = &editor.pointer_error {
+        ui.label(RichText::new(format!("Couldn't read device settings. {error}")).color(WARNING));
+    }
+    if labeled_button(ui, "Read current settings", Icon::Refresh, retry).clicked() {
+        return Some(Command::Reload);
+    }
+    let pointer = editor.pointer.as_ref()?;
+    let editable = editable && editor.pointer_error.is_none();
     ScrollArea::vertical()
         .id_salt("pointer-settings")
         .show(ui, |ui| {
+            if let Some(error) = &pointer.dpi_error {
+                ui.label(
+                    RichText::new(format!("Couldn't read pointer speed. {error}")).color(WARNING),
+                );
+            }
+            if let Some(error) = &pointer.wheel_error {
+                ui.label(
+                    RichText::new(format!("Couldn't read SmartShift. {error}")).color(WARNING),
+                );
+            }
             if let Some(dpi) = &pointer.dpi {
+                let editable = editable && pointer.dpi_error.is_none();
                 card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(title("Pointer speed", 16.));
-                    ui.label(muted(format!(
-                        "Current device setting · {} DPI",
-                        dpi.current
-                    )));
+                    ui.label(muted(format!("Last device reading · {} DPI", dpi.current)));
                     let Some(choice) = &mut editor.dpi_choice else {
                         return;
                     };
@@ -569,6 +759,7 @@ fn pointer_workspace(ui: &mut Ui, editor: &mut Editor, editable: bool) -> Option
                 ui.add_space(12.);
             }
             if let (Some(current), Some(choice)) = (pointer.wheel, &mut editor.wheel_choice) {
+                let editable = editable && pointer.wheel_error.is_none();
                 card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(title("SmartShift", 16.));
@@ -821,8 +1012,8 @@ fn inspector(ui: &mut Ui, editor: &mut Editor, controls: &[Control]) {
         if let Some(change) = action_picker(ui, &mut editor.entry, menu, action) {
             if gesture {
                 let direction = editor.direction;
-                if let Some(Binding::Gesture(actions)) = editor.bindings_mut().get_mut(&control.id)
-                {
+                let bindings = editor.bindings_mut();
+                if let Some(Binding::Gesture(actions)) = bindings.get_mut(&control.id) {
                     match change {
                         Some(action) => {
                             actions.insert(direction, action);
@@ -830,6 +1021,9 @@ fn inspector(ui: &mut Ui, editor: &mut Editor, controls: &[Control]) {
                         None => {
                             actions.remove(&direction);
                         }
+                    }
+                    if actions.is_empty() {
+                        bindings.remove(&control.id);
                     }
                 }
             } else {
@@ -846,7 +1040,12 @@ fn inspector(ui: &mut Ui, editor: &mut Editor, controls: &[Control]) {
             }
             editor.notice = None;
         }
-        if gesture && ui.button("Restore device default").clicked() {
+        let restore = if editor.application.is_some() {
+            "Inherit default"
+        } else {
+            "Restore device default"
+        };
+        if gesture && ui.button(restore).clicked() {
             editor.bindings_mut().remove(&control.id);
             editor.entry = None;
             editor.notice = None;
@@ -1421,4 +1620,49 @@ fn edit_ring_slot(
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pointer(dpi: u16, threshold: u8) -> Pointer {
+        Pointer {
+            dpi: Some(controls::Dpi {
+                current: dpi,
+                supported: vec![1000, 1100, 1200],
+            }),
+            wheel: Some(Wheel {
+                mode: WheelMode::Ratchet,
+                threshold,
+                default_threshold: 30,
+            }),
+            ..Pointer::default()
+        }
+    }
+
+    #[test]
+    fn applying_dpi_keeps_the_independent_wheel_draft() {
+        let mut editor = Editor::default();
+        editor.pointer_loaded(Ok(pointer(1000, 30)), None);
+        editor.dpi_choice = Some(1100);
+        editor.wheel_choice.as_mut().unwrap().threshold = 40;
+
+        editor.pointer_loaded(Ok(pointer(1100, 35)), Some(Tuning::Dpi));
+        assert_eq!(editor.dpi_choice, Some(1100));
+        assert_eq!(
+            editor.pointer.as_ref().unwrap().wheel.unwrap().threshold,
+            35
+        );
+        assert_eq!(editor.wheel_choice.unwrap().threshold, 40);
+
+        editor.pointer_loaded(Err("Disconnected during read".into()), None);
+        assert!(editor.pointer_error.is_some());
+        assert_eq!(editor.wheel_choice.unwrap().threshold, 40);
+
+        editor.pointer_loaded(Ok(pointer(1200, 35)), None);
+        assert!(editor.pointer_error.is_none());
+        assert_eq!(editor.dpi_choice, Some(1200));
+        assert_eq!(editor.wheel_choice.unwrap().threshold, 40);
+    }
 }
