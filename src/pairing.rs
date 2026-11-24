@@ -142,7 +142,7 @@ pub enum Event {
     Searching,
     Found { id: u16, name: String },
     Confirm(Passkey),
-    Paired(u8),
+    Paired { slot: u8, name: Option<String> },
     Finished(Result<(), String>),
 }
 
@@ -522,7 +522,9 @@ fn run(
                     }
                     if b[3] == 2 && b[11] != 0 {
                         phase = Phase::Done;
-                        let _ = events.send(Event::Paired(b[11]));
+                        let slot = b[11];
+                        let name = io.peripheral_name(true, slot);
+                        let _ = events.send(Event::Paired { slot, name });
                         return Ok(());
                     }
                 }
@@ -547,7 +549,9 @@ fn run(
                         && !previous_slots.contains(&b[1]) =>
                 {
                     phase = Phase::Done;
-                    let _ = events.send(Event::Paired(b[1]));
+                    let slot = b[1];
+                    let name = io.peripheral_name(false, slot);
+                    let _ = events.send(Event::Paired { slot, name });
                     return Ok(());
                 }
                 _ => {}

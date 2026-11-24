@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 mod action_labels;
 mod controls;
 mod feature_panels;
+mod gallery;
 mod pairing;
 mod theme;
 mod ui;
@@ -59,6 +60,8 @@ pub struct OpenOptions {
     page: Page,
     detail: Option<Detail>,
     device_query: String,
+    device_view: gallery::View,
+    selected_device: Option<DeviceKey>,
     profile_query: String,
     sender: Sender<Event>,
     events: Receiver<Event>,
@@ -70,6 +73,7 @@ pub struct OpenOptions {
     preview: Option<(Source, Preview)>,
     notice: Option<Notice>,
     writing: bool,
+    store_error: Option<String>,
     profiles: Saved,
     editors: BTreeMap<DeviceKey, controls::Editor>,
     live_controls: Option<controls::LiveControls>,
@@ -86,6 +90,8 @@ impl OpenOptions {
             page: Page::Devices,
             detail: None,
             device_query: String::new(),
+            device_view: gallery::View::Gallery,
+            selected_device: None,
             profile_query: String::new(),
             sender,
             events,
@@ -96,7 +102,8 @@ impl OpenOptions {
             reading: false,
             preview: None,
             notice: None,
-            writing: true,
+            writing: false,
+            store_error: None,
             profiles: Vec::new(),
             editors: BTreeMap::new(),
             live_controls: None,
@@ -105,7 +112,14 @@ impl OpenOptions {
             rescan: false,
         };
         app.scan(context);
-        app.job(context, || {
+        app.load_profiles(context);
+        app
+    }
+
+    fn load_profiles(&mut self, context: &egui::Context) {
+        self.writing = true;
+        self.store_error = None;
+        self.job(context, || {
             let result = (|| {
                 let path = Store::location()?;
                 let profiles = if path.is_file() {
@@ -117,7 +131,6 @@ impl OpenOptions {
             })();
             Event::Store(result)
         });
-        app
     }
 
     fn job(&self, context: &egui::Context, work: impl FnOnce() -> Event + Send + 'static) {
@@ -156,6 +169,7 @@ impl OpenOptions {
         };
         self.writing = true;
         self.notice = None;
+        self.store_error = None;
         self.job(context, move || {
             let result = (|| {
                 let path = Store::location()?;
@@ -262,7 +276,13 @@ impl OpenOptions {
                     self.reading = false;
                     match result {
                         Ok(preview) => self.preview = Some((source, preview)),
-                        Err(error) => self.notice = Some(Notice::Error(error)),
+                        Err(error) => {
+                            let name = source.path.file_name().unwrap_or(source.path.as_os_str());
+                            self.notice = Some(Notice::Error(format!(
+                                "Could not preview {}. {error} Check the file format or choose another file.",
+                                name.to_string_lossy(),
+                            )));
+                        }
                     }
                 }
                 Event::Store(result) => {
@@ -270,6 +290,7 @@ impl OpenOptions {
                     match result {
                         Ok((count, profiles)) => {
                             self.profiles = profiles;
+                            self.store_error = None;
                             if let Some(count) = count {
                                 self.notice = Some(Notice::Info(if count == 0 {
                                     "These profiles are already saved.".into()
@@ -282,9 +303,8 @@ impl OpenOptions {
                             }
                         }
                         Err(error) => {
-                            self.notice = Some(Notice::Error(format!(
-                                "Could not access saved profiles. {error}"
-                            )))
+                            self.store_error =
+                                Some(format!("Could not access saved profiles. {error}"));
                         }
                     }
                 }

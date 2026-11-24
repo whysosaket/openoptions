@@ -1,6 +1,5 @@
-use super::controls::card;
-use super::{OpenOptions, theme::*};
-use eframe::egui::{self, Button, Context, Id, RichText};
+use super::{OpenOptions, theme::*, workspace};
+use eframe::egui::{self, Button, Context, Id, RichText, ScrollArea, Ui};
 use openoptions::{
     devices::{self, Device, DeviceKey},
     pairing::{self, Passkey, ReceiverDevice},
@@ -13,7 +12,7 @@ use std::{
 
 #[derive(Default)]
 pub(super) struct Wizard {
-    pub receivers: Option<Result<Vec<ReceiverDevice>, String>>,
+    receivers: Option<Result<Vec<ReceiverDevice>, String>>,
     receiver_scan: Option<Receiver<Result<Vec<ReceiverDevice>, String>>>,
     connection: Option<ReceiverDevice>,
     session: Option<pairing::Pairing>,
@@ -21,10 +20,15 @@ pub(super) struct Wizard {
     searching: bool,
     selected: Option<String>,
     passkey: Option<Passkey>,
-    paired: Option<u8>,
+    paired: Option<PairedDevice>,
     cancelling: bool,
     error: Option<String>,
     bluetooth: Option<BluetoothPairing>,
+}
+
+struct PairedDevice {
+    slot: u8,
+    name: Option<String>,
 }
 
 struct BluetoothPairing {
@@ -82,7 +86,12 @@ impl Wizard {
                 self.candidates.insert(id, name);
             }
             pairing::Event::Confirm(passkey) => self.passkey = Some(passkey),
-            pairing::Event::Paired(slot) => self.paired = Some(slot),
+            pairing::Event::Paired { slot, name } => {
+                self.paired = Some(PairedDevice {
+                    slot,
+                    name: name.or_else(|| self.selected.clone()),
+                });
+            }
             pairing::Event::Finished(_) => unreachable!(),
         }
         false
@@ -147,166 +156,319 @@ impl Wizard {
         true
     }
 
-    fn show(&mut self, context: &Context, inventory: &Result<Vec<Device>, String>) -> bool {
-        let response = egui::Modal::new(Id::new("add-device"))
-            .frame(card().fill(WINDOW).inner_margin(24))
-            .show(context, |ui| {
-            let width = (context.content_rect().width() - 64.).clamp(260., 470.);
-            ui.set_width(width);
-            ui.spacing_mut().item_spacing.y = 12.;
-            ui.label(title("Add Device", 23.));
-            if let Some(bluetooth) = &self.bluetooth {
-                if let Some(name) = &bluetooth.found {
-                    ui.label(title("Device connected", 17.));
-                    ui.label(name);
-                    if ui.add(primary("Done")).clicked() {
-                        ui.close();
-                    }
-                } else {
-                    ui.spinner();
-                    ui.label(muted("Finish pairing in system Bluetooth settings. OpenOptions will look for the new device here."));
-                    if ui.button("Cancel").clicked() {
-                        ui.close();
-                    }
-                }
-                return;
-            }
-            if let Some(slot) = self.paired {
-                ui.label(title("Device paired", 17.));
-                ui.label(muted(format!("Connected to receiver slot {slot}.")));
-                if let Some(error) = &self.error {
-                    ui.label(RichText::new(error).color(WARNING));
-                }
-                if ui.add_enabled(self.session.is_none(), primary("Done")).clicked() {
-                    ui.close();
-                }
-                return;
-            }
-            if self.cancelling {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Closing the pairing window…");
-                });
-                return;
-            }
-            if let Some(error) = &self.error {
-                ui.label(RichText::new(error).color(WARNING));
-            }
-            if let Some(receiver) = &self.connection {
-                ui.label(title(&receiver.name, 16.));
-                if let Some(passkey) = &self.passkey {
-                    ui.label(title("Confirm pairing", 16.));
-                    match passkey {
-                        Passkey::Keyboard(digits) => {
-                            ui.label(muted("Type this code on the new keyboard, then press Enter."));
-                            ui.label(RichText::new(digits).monospace().size(25.));
-                        }
-                        Passkey::Mouse(clicks) => {
-                            ui.label(muted("Click the buttons in order on the new mouse. Then press left and right together."));
-                            ui.horizontal_wrapped(|ui| {
-                                for (index, right) in clicks.iter().enumerate() {
-                                    ui.label(format!("{} {}", index + 1, if *right { "R" } else { "L" }));
-                                }
-                            });
-                        }
-                    }
-                } else if let Some(name) = &self.selected {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Pairing with {name}…"));
-                    });
-                } else if self.session.is_some() {
-                    ui.label(muted("Select an Easy-Switch channel on the device and hold its pairing button until the light blinks."));
-                    if !self.searching || self.candidates.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(if self.searching { "Searching for devices…" } else { "Opening the pairing window…" });
-                        });
-                    } else {
-                        for (&id, name) in &self.candidates {
-                            if ui.add_sized([ui.available_width(), 42.], Button::new(name)).clicked()
-                                && let Some(session) = &self.session
-                            {
-                                self.selected = Some(name.clone());
-                                session.pair(id);
-                            }
-                        }
-                    }
-                }
-                if self.session.is_none() && ui.button("Choose another receiver").clicked() {
-                    self.connection = None;
-                    self.error = None;
-                }
-            } else {
-                ui.label(title("Choose a receiver", 16.));
-                ui.label(muted("Put the device in pairing mode, then choose its Bolt or Unifying receiver to start searching."));
-                match self.receivers.as_ref() {
-                    None => { ui.spinner(); }
-                    Some(Err(error)) => { ui.label(RichText::new(error).color(WARNING)); }
-                    Some(Ok(receivers)) => {
-                        let total = receivers.len();
-                        let mut selected = None;
-                        for (index, receiver) in receivers.iter().enumerate() {
-                            let name = if total > 1 { format!("{} · {}", receiver.name, index + 1) } else { receiver.name.clone() };
-                            if ui.add_sized([ui.available_width(), 42.], Button::new(name)).clicked() {
-                                selected = Some(receiver.clone());
-                            }
-                        }
-                        if let Some(receiver) = selected {
-                            self.start(receiver, context);
-                        }
-                        if total == 0 {
-                            ui.label(muted("No Bolt or Unifying receiver found. Plug in a receiver or use Bluetooth."));
-                        }
-                    }
-                }
-                ui.separator();
-                if ui.button("Use Bluetooth settings").clicked() {
-                    match inventory {
-                        Ok(devices) => match devices::open_bluetooth_settings() {
-                            Ok(()) => {
-                                let now = Instant::now();
-                                self.error = None;
-                                self.bluetooth = Some(BluetoothPairing {
-                                    starting_devices: devices.iter()
-                                        .filter(|device| device.connected)
-                                        .map(Device::key)
-                                        .collect(),
-                                    found: None,
-                                    next_scan: now,
-                                    deadline: now + Duration::from_secs(120),
-                                });
-                                context.request_repaint();
-                            }
-                            Err(error) => self.error = Some(error),
-                        },
-                        Err(_) => {
-                            self.error = Some("Refresh the Devices list before starting Bluetooth pairing.".into());
-                        }
-                    }
-                }
-            }
-            let label = if self.session.is_some() { "Cancel pairing" } else { "Cancel" };
-            if ui.button(label).clicked() {
-                ui.close();
-            }
-        });
-        response.should_close() && self.cancel()
-    }
-}
-
-impl OpenOptions {
-    pub(super) fn open_pairing(&mut self, context: &Context) {
+    fn scan_receivers(&mut self, context: &Context) {
+        self.receivers = None;
         let (send, receiver_scan) = mpsc::channel();
-        self.pairing = Some(Wizard {
-            receiver_scan: Some(receiver_scan),
-            ..Wizard::default()
-        });
+        self.receiver_scan = Some(receiver_scan);
         let context = context.clone();
         std::thread::spawn(move || {
             let _ = send.send(pairing::receivers());
             context.request_repaint();
         });
+    }
+
+    fn start_bluetooth(&mut self, context: &Context, inventory: &Result<Vec<Device>, String>) {
+        let Ok(devices) = inventory else {
+            self.error = Some("Refresh Devices before starting Bluetooth pairing.".into());
+            return;
+        };
+        if let Err(error) = devices::open_bluetooth_settings() {
+            self.error = Some(error);
+            return;
+        }
+        let now = Instant::now();
+        self.error = None;
+        self.bluetooth = Some(BluetoothPairing {
+            starting_devices: devices
+                .iter()
+                .filter(|device| device.connected)
+                .map(Device::key)
+                .collect(),
+            found: None,
+            next_scan: now,
+            deadline: now + Duration::from_secs(120),
+        });
+        context.request_repaint();
+    }
+
+    fn show(
+        &mut self,
+        context: &Context,
+        inventory: &Result<Vec<Device>, String>,
+        scanning: bool,
+    ) -> bool {
+        let size = context.content_rect().size();
+        let response = egui::Modal::new(Id::new("add-device"))
+            .frame(surface(22))
+            .show(context, |ui| {
+                ui.set_width((size.x - 64.).clamp(250., 488.));
+                ui.spacing_mut().item_spacing.y = 12.;
+                ui.label(title("Add Device", 23.));
+                workspace::divider(ui);
+                ScrollArea::vertical()
+                    .id_salt("pairing-content")
+                    .max_height((size.y - 175.).max(110.))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        if self.cancelling {
+                            progress(ui, "Closing the receiver pairing window…");
+                        } else if let Some(search) = &self.bluetooth {
+                            if let Some(name) = &search.found {
+                                self.success(ui, name, "Connected over Bluetooth");
+                            } else {
+                                ui.label(title("Waiting for Bluetooth", 17.));
+                                ui.label(muted("Finish pairing in system Bluetooth settings. OpenOptions will look for the new device here."));
+                                progress(ui, "Checking connected devices…");
+                            }
+                        } else if let Some(paired) = &self.paired {
+                            let name = paired.name.as_deref().unwrap_or("New Logitech device");
+                            let receiver = self.connection.as_ref().map_or("receiver", |receiver| receiver.name.as_str());
+                            self.success(ui, name, &format!("{receiver} · Slot {}", paired.slot));
+                        } else if self.connection.is_some() {
+                            self.receiver_steps(ui, context);
+                        } else {
+                            self.methods(ui, context, inventory, scanning);
+                        }
+                        if let Some(error) = &self.error {
+                            ui.label(RichText::new(error).color(WARNING));
+                        }
+                    });
+                if !self.cancelling {
+                    workspace::divider(ui);
+                    let done = self.paired.is_some() || self.bluetooth.as_ref().is_some_and(|search| search.found.is_some());
+                    workspace::trailing(ui, |ui| {
+                        if done {
+                            if ui.add_enabled(self.session.is_none(), primary("Done")).clicked() {
+                                ui.close();
+                            }
+                        } else if ui.button(if self.session.is_some() { "Cancel pairing" } else { "Cancel" }).clicked() {
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        response.should_close() && !self.cancelling && self.cancel()
+    }
+
+    fn success(&self, ui: &mut Ui, name: &str, connection: &str) {
+        workspace::badge(ui, "Device connected", true);
+        ui.label(title(name, 19.));
+        ui.label(muted(connection));
+    }
+
+    fn methods(
+        &mut self,
+        ui: &mut Ui,
+        context: &Context,
+        inventory: &Result<Vec<Device>, String>,
+        scanning: bool,
+    ) {
+        ui.label(title("Choose a connection", 17.));
+        surface(10).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(title("Bluetooth", 14.));
+                    ui.label(muted("Pair in system settings").size(12.));
+                });
+                workspace::trailing(ui, |ui| {
+                    if ui
+                        .add_enabled(!scanning, Button::new("Open Bluetooth settings"))
+                        .clicked()
+                    {
+                        self.start_bluetooth(context, inventory);
+                    }
+                });
+            });
+        });
+        let mut chosen = None;
+        for (bolt, title_text) in [(true, "Logi Bolt receiver"), (false, "Unifying receiver")] {
+            surface(10).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(title(title_text, 14.));
+                    workspace::trailing(ui, |ui| match &self.receivers {
+                        None => {
+                            ui.spinner();
+                            ui.label(muted("Checking…").size(12.));
+                        }
+                        Some(Err(_)) => {
+                            ui.label(RichText::new("Scan failed").color(WARNING).size(12.));
+                        }
+                        Some(Ok(receivers)) => {
+                            let count = receivers
+                                .iter()
+                                .filter(|receiver| receiver.bolt == bolt)
+                                .count();
+                            workspace::badge(
+                                ui,
+                                if count > 0 {
+                                    "Available"
+                                } else {
+                                    "Not detected"
+                                },
+                                count > 0,
+                            );
+                        }
+                    });
+                });
+                if let Some(Ok(receivers)) = &self.receivers {
+                    for (index, receiver) in receivers
+                        .iter()
+                        .filter(|receiver| receiver.bolt == bolt)
+                        .enumerate()
+                    {
+                        let label = format!(
+                            "Use {} {}",
+                            if bolt { "Bolt" } else { "Unifying" },
+                            index + 1
+                        );
+                        if ui.button(label).clicked() {
+                            chosen = Some(receiver.clone());
+                        }
+                    }
+                }
+            });
+        }
+        if let Some(receiver) = chosen {
+            self.connection = Some(receiver);
+            self.error = None;
+        }
+        if let Some(result) = &self.receivers {
+            if let Err(error) = result {
+                ui.label(RichText::new(error).color(WARNING));
+            } else if result.as_ref().is_ok_and(Vec::is_empty) {
+                ui.label(muted(
+                    "Plug in a Bolt or Unifying receiver, then check again.",
+                ));
+            }
+            if labeled_button(ui, "Check receivers again", Icon::Refresh, true).clicked() {
+                self.scan_receivers(context);
+            }
+        }
+    }
+
+    fn receiver_steps(&mut self, ui: &mut Ui, context: &Context) {
+        let receiver = self
+            .connection
+            .as_ref()
+            .expect("receiver step has a device")
+            .clone();
+        ui.label(muted(&receiver.name).size(12.));
+        if self.session.is_none() {
+            ui.label(title(
+                if self.error.is_some() {
+                    "Pairing stopped"
+                } else {
+                    "Prepare your device"
+                },
+                17.,
+            ));
+            pairing_instructions(ui, receiver.bolt);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(primary(if self.error.is_some() {
+                        "Try again"
+                    } else {
+                        "Start pairing"
+                    }))
+                    .clicked()
+                {
+                    self.start(receiver, context);
+                }
+                if ui.button("Change connection").clicked() {
+                    self.connection = None;
+                    self.error = None;
+                    self.scan_receivers(context);
+                }
+            });
+            return;
+        }
+        if let Some(passkey) = &self.passkey {
+            ui.label(title("Verify your device", 17.));
+            if let Some(device) = &self.selected {
+                ui.label(title(device, 14.));
+            }
+            match passkey {
+                Passkey::Keyboard(digits) => {
+                    ui.label(muted(
+                        "Enter this code on the new keyboard, then press Enter on that keyboard.",
+                    ));
+                    surface(12).show(ui, |ui| {
+                        ui.label(RichText::new(digits).monospace().size(25.));
+                    });
+                }
+                Passkey::Mouse(clicks) => {
+                    ui.label(muted("Click these buttons in order on the new mouse."));
+                    surface(10).show(ui, |ui| {
+                        for (row, steps) in clicks.chunks(5).enumerate() {
+                            ui.horizontal_wrapped(|ui| {
+                                for (index, right) in steps.iter().enumerate() {
+                                    workspace::badge(
+                                        ui,
+                                        &format!(
+                                            "{}  {}",
+                                            row * 5 + index + 1,
+                                            if *right { "Right" } else { "Left" }
+                                        ),
+                                        false,
+                                    );
+                                }
+                            });
+                        }
+                    });
+                    ui.label(muted("Finish by pressing left and right together."));
+                }
+            }
+        } else if let Some(device) = &self.selected {
+            progress(ui, &format!("Pairing {device}…"));
+        } else if self.candidates.is_empty() {
+            ui.label(title("Find your device", 17.));
+            pairing_instructions(ui, receiver.bolt);
+            progress(
+                ui,
+                if self.searching {
+                    "Searching for devices…"
+                } else {
+                    "Opening the receiver pairing window…"
+                },
+            );
+        } else {
+            ui.label(title("Choose the device to pair", 17.));
+            for (&id, name) in &self.candidates {
+                if ui
+                    .add_sized([ui.available_width(), 36.], Button::new(name))
+                    .clicked()
+                    && let Some(session) = &self.session
+                {
+                    self.selected = Some(name.clone());
+                    session.pair(id);
+                }
+            }
+        }
+    }
+}
+
+fn progress(ui: &mut Ui, label: &str) {
+    ui.horizontal(|ui| {
+        ui.spinner();
+        ui.label(muted(label));
+    });
+}
+
+fn pairing_instructions(ui: &mut Ui, bolt: bool) {
+    ui.label(muted(if bolt {
+        "Select a channel on the device, then hold its pairing button until the light blinks."
+    } else {
+        "Put the device into pairing mode when the receiver starts searching. For devices without a pairing button, turn them off and back on."
+    }));
+}
+
+impl OpenOptions {
+    pub(super) fn open_pairing(&mut self, context: &Context) {
+        let mut wizard = Wizard::default();
+        wizard.scan_receivers(context);
+        self.pairing = Some(wizard);
     }
 
     pub(super) fn show_pairing(&mut self, context: &Context) {
@@ -315,7 +477,7 @@ impl OpenOptions {
         };
         let refresh =
             wizard.poll(context) | wizard.check_bluetooth(context, &self.devices, self.scanning);
-        if wizard.show(context, &self.devices) {
+        if wizard.show(context, &self.devices, self.scanning) {
             self.pairing = None;
         }
         if refresh {
@@ -338,14 +500,22 @@ mod tests {
             id: 3,
             name: "Late device".into(),
         }));
-        assert!(!wizard.accept(pairing::Event::Paired(2)));
+        assert!(!wizard.accept(pairing::Event::Paired {
+            slot: 2,
+            name: Some("Late device".into()),
+        }));
         assert!(wizard.cancelling);
         assert!(wizard.candidates.is_empty());
         assert!(wizard.paired.is_none());
         assert!(!wizard.accept(pairing::Event::Finished(Ok(()))));
         assert!(!wizard.cancelling);
-        assert!(!wizard.accept(pairing::Event::Paired(1)));
+        assert!(!wizard.accept(pairing::Event::Paired {
+            slot: 1,
+            name: Some("New mouse".into()),
+        }));
         assert!(wizard.accept(pairing::Event::Finished(Ok(()))));
-        assert_eq!(wizard.paired, Some(1));
+        let paired = wizard.paired.unwrap();
+        assert_eq!(paired.slot, 1);
+        assert_eq!(paired.name.as_deref(), Some("New mouse"));
     }
 }

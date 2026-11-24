@@ -1,7 +1,5 @@
 use super::{Detail, Notice, OpenOptions, Page, action_labels::action_label, theme::*, workspace};
 use eframe::egui::{self, Button, CentralPanel, Frame, RichText, ScrollArea, TextEdit, Ui, Vec2};
-use openoptions::controls::Battery;
-use openoptions::devices::Device;
 use openoptions::migration::{
     Action, Binding, Profile, ScrollDirection, Source, SourceKind, WheelMode,
 };
@@ -37,7 +35,7 @@ impl eframe::App for OpenOptions {
                         mark(ui.painter(), rect.center());
                         for (page, label) in [
                             (Page::Devices, "Devices"),
-                            (Page::Import, "Import"),
+                            (Page::Import, "Import settings"),
                             (Page::Profiles, "Profiles"),
                         ] {
                             if ui.selectable_label(self.page == page, label).clicked() {
@@ -86,7 +84,7 @@ impl eframe::App for OpenOptions {
 }
 
 impl OpenOptions {
-    fn navigate(&mut self, page: Page) {
+    pub(super) fn navigate(&mut self, page: Page) {
         if self.page != page || self.detail.is_some() {
             self.page = page;
             self.detail = None;
@@ -124,8 +122,13 @@ impl OpenOptions {
             {
                 self.stop_controls();
             }
-            if inventory && ui.add(primary("+ Add Device")).clicked() {
-                self.open_pairing(ui.ctx());
+            if inventory {
+                if ui.add(primary("Add Device")).clicked() {
+                    self.open_pairing(ui.ctx());
+                }
+                if labeled_button(ui, "Refresh", Icon::Refresh, !self.scanning).clicked() {
+                    self.scan(ui.ctx());
+                }
             }
             if sources {
                 if labeled_button(ui, "Scan again", Icon::Refresh, !self.scanning).clicked() {
@@ -165,190 +168,72 @@ impl OpenOptions {
         }
     }
 
-    fn devices_ui(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            if self
-                .devices
-                .as_ref()
-                .is_ok_and(|devices| !devices.is_empty())
-            {
-                workspace::search(ui, &mut self.device_query, "Search devices");
-            }
-            workspace::trailing(ui, |ui| {
-                if labeled_button(ui, "Refresh", Icon::Refresh, !self.scanning).clicked() {
-                    self.scan(ui.ctx());
-                }
-                if self.scanning {
-                    ui.spinner();
-                }
-            });
-        });
-        show_notice(ui, self.notice.as_ref());
-        let mut selected = None;
-        match &self.devices {
-            Ok(devices) if devices.is_empty() && self.scanning => {
-                skeleton(ui, "devices", ["Device", "Connection", "Status"]);
-            }
-            Ok(devices) if devices.is_empty() => {
-                workspace::empty(
-                    ui,
-                    "No devices connected",
-                    "Connect a Logitech receiver or pair a device over Bluetooth.",
-                    |_| {},
-                );
-            }
-            Err(error) => {
-                let mut retry = false;
-                workspace::empty(
-                    ui,
-                    "Couldn't scan for devices",
-                    "Check your device connection and try again.",
-                    |ui| {
-                        ui.collapsing("Details", |ui| {
-                            ui.label(muted(error));
-                        });
-                        retry = labeled_button(ui, "Try again", Icon::Refresh, !self.scanning)
-                            .clicked();
-                    },
-                );
-                if retry {
-                    self.scan(ui.ctx());
-                }
-            }
-            Ok(devices) => {
-                let query = self.device_query.trim().to_lowercase();
-                let mut rows = devices
-                    .iter()
-                    .filter(|device| {
-                        matches_query(&query, &[device.name.as_str(), device.connection])
-                    })
-                    .peekable();
-                if rows.peek().is_none() {
-                    workspace::empty(
-                        ui,
-                        "No matching devices",
-                        "Try a different name or connection.",
-                        |ui| {
-                            if ui.button("Clear search").clicked() {
-                                self.device_query.clear();
-                            }
-                        },
-                    );
-                } else {
-                    let visible: Vec<_> = rows.collect();
-                    let columns = if ui.available_width() >= 950. { 3 } else { 2 };
-                    ScrollArea::vertical()
-                        .id_salt("device-gallery")
-                        .show(ui, |ui| {
-                            let edge = ((ui.available_width() - 16. * (columns as f32 - 1.))
-                                / columns as f32)
-                                .min(326.);
-                            for row in visible.chunks(columns) {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 16.;
-                                    for device in row {
-                                        if device_tile(ui, device, edge) {
-                                            selected = Some((*device).clone());
-                                        }
-                                    }
-                                });
-                                ui.add_space(7.);
-                            }
-                        });
-                }
-            }
-        }
-        if let Some(device) = selected {
-            self.open_device(device, ui.ctx());
-        }
-        if !self.sources.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(muted(format!("{} settings files found", self.sources.len())).size(12.));
-                workspace::trailing(ui, |ui| {
-                    if labeled_button(ui, "Review imports", Icon::Import, true).clicked() {
-                        self.navigate(Page::Import);
-                    }
-                });
-            });
-        }
-    }
-
     fn import_sources(&mut self, ui: &mut Ui) {
         ScrollArea::vertical()
             .id_salt("import sources")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                show_notice(ui, self.notice.as_ref());
                 let busy = self.reading || self.writing;
                 let mut selected = None;
+                ui.label(title("Discovered settings", 17.));
                 if self.sources.is_empty() && self.scanning {
-                    skeleton(ui, "sources", ["Source", "File", ""]);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Looking for settings files…");
+                    });
                 } else if self.sources.is_empty() {
                     workspace::empty(
                         ui,
                         "No settings files found",
-                        "Enter the path to a settings file below.",
+                        "Choose a copied configuration below.",
                         |_| {},
                     );
                 } else {
-                    workspace::index(
-                        ui,
-                        "sources",
-                        ["Source", "File", ""],
-                        126.,
-                        |ui, columns| {
-                            for (index, source) in self.sources.iter().enumerate() {
-                                if index > 0 {
-                                    workspace::divider(ui);
-                                }
-                                let path = source.path.display().to_string();
-                                let file = source
-                                    .path
-                                    .file_name()
-                                    .map(|name| name.to_string_lossy())
-                                    .unwrap_or((&path).into());
-                                columns.row(
-                                    ui,
-                                    |ui| {
-                                        icon(ui, Icon::File, 16., MUTED);
-                                        ui.add_space(7.);
-                                        clipped(
-                                            ui,
-                                            title(source.kind.name(), 14.),
-                                            source.kind.name(),
-                                        );
-                                    },
-                                    |ui| clipped(ui, muted(file.as_ref()).size(12.), &path),
-                                    |ui| {
+                    surface(12).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        for (index, source) in self.sources.iter().enumerate() {
+                            if index > 0 {
+                                workspace::divider(ui);
+                            }
+                            ui.push_id(index, |ui| {
+                                ui.horizontal(|ui| {
+                                    icon(ui, Icon::File, 16., MUTED);
+                                    ui.vertical(|ui| {
+                                        ui.set_max_width((ui.available_width() - 110.).max(80.));
+                                        ui.label(title(source.kind.name(), 14.));
+                                        clipped(ui, muted(source_file(source)).size(12.), &source.path.to_string_lossy());
+                                    });
+                                    workspace::trailing(ui, |ui| {
                                         if ui.add_enabled(!busy, Button::new("Preview")).clicked() {
                                             selected = Some(source.clone());
                                         }
-                                    },
-                                );
-                            }
-                        },
-                    );
-                }
-                ui.collapsing("Use a settings file", |ui| {
-                    ui.label(muted("Path to a TOML, SQLite, or JSON file"));
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            TextEdit::singleline(&mut self.manual_path)
-                                .hint_text("File path")
-                                .desired_width((ui.available_width() - 113.).max(80.)),
-                        );
-                        if ui
-                            .add_enabled(
-                                !busy && !self.manual_path.trim().is_empty(),
-                                Button::new("Preview file"),
-                            )
-                            .clicked()
-                        {
-                            let path = PathBuf::from(self.manual_path.trim());
-                            match SourceKind::from_path(&path) {
-                                Ok(kind) => selected = Some(Source { kind, path }),
-                                Err(error) => self.notice = Some(Notice::Error(error)),
-                            }
+                                    });
+                                });
+                            });
                         }
+                    });
+                }
+                surface(12).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.collapsing("Use a settings file", |ui| {
+                        ui.label(muted("Enter the path to an OpenLogi TOML file, an Options+ SQLite database, or an Options+ JSON export."));
+                        ui.horizontal(|ui| {
+                            let path = ui.add_enabled(!busy,
+                                TextEdit::singleline(&mut self.manual_path)
+                                    .hint_text("File path")
+                                    .desired_width((ui.available_width() - 122.).max(80.)),
+                            );
+                            let ready = !busy && !self.manual_path.trim().is_empty();
+                            let enter = path.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            if ui.add_enabled(ready, Button::new("Preview file")).clicked() || (ready && enter) {
+                                let path = PathBuf::from(self.manual_path.trim());
+                                match SourceKind::from_path(&path) {
+                                    Ok(kind) => selected = Some(Source { kind, path }),
+                                    Err(error) => self.notice = Some(Notice::Error(error)),
+                                }
+                            }
+                        });
                     });
                 });
                 if let Some(source) = selected {
@@ -360,60 +245,101 @@ impl OpenOptions {
                         ui.label(muted("Reading settings…"));
                     });
                 }
-                show_notice(ui, self.notice.as_ref());
             });
     }
 
-    fn review_ui(&self, ui: &mut Ui) {
+    fn review_ui(&mut self, ui: &mut Ui) {
         let Some((source, preview)) = &self.preview else {
             return;
         };
         show_notice(ui, self.notice.as_ref());
+        if let Some(error) = &self.store_error {
+            ui.label(RichText::new(error).color(WARNING));
+        }
+        let mut show_profiles = false;
         ScrollArea::vertical()
             .id_salt("review import")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.label(muted(format!("Source · {}", source.kind.name())).size(12.));
+                surface(14).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(title(source.kind.name(), 17.));
+                    clipped(ui, muted(source_file(source)), &source.path.to_string_lossy());
+                    if !preview.profiles.is_empty() {
+                        let assignments = preview.profiles.iter().map(assignment_count).sum::<usize>();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(muted(format!(
+                                "{} · {}",
+                                workspace::profile_count(preview.profiles.len()),
+                                assignment_summary(assignments),
+                            )));
+                            if matches!(self.notice, Some(Notice::Info(_)))
+                                && ui.button("View saved profiles").clicked()
+                            {
+                                show_profiles = true;
+                            }
+                        });
+                        ui.label(muted("Import saves copies in OpenOptions. Apply compatible assignments from the device editor."));
+                    }
+                });
                 if preview.profiles.is_empty() {
                     workspace::empty(
                         ui,
                         "No supported settings",
-                        "Choose another file to import.",
+                        "Return to Import settings and choose another file.",
                         |_| {},
                     );
                 }
+                if !preview.skipped.is_empty() {
+                    let count: usize = preview.skipped.values().sum();
+                    surface(12).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::CollapsingHeader::new(
+                            RichText::new(format!("Skipped settings ({count})")).color(WARNING),
+                        )
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (reason, count) in &preview.skipped {
+                                ui.label(muted(format!("{reason} ({count})")));
+                            }
+                        });
+                    });
+                }
                 for (index, profile) in preview.profiles.iter().enumerate() {
                     ui.push_id(index, |ui| {
-                        ui.label(title(self.profile_name(profile, source.kind), 22.));
+                        workspace::divider(ui);
+                        ui.label(title(self.profile_name(profile, source.kind), 20.));
+                        profile_identity(ui, profile);
                         profile_sections(ui, profile);
                     });
                 }
-                if !preview.skipped.is_empty() {
-                    let count: usize = preview.skipped.values().sum();
-                    egui::CollapsingHeader::new(
-                        RichText::new(format!("Skipped settings ({count})")).color(WARNING),
-                    )
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for (reason, count) in &preview.skipped {
-                            ui.label(muted(format!("{reason} ({count})")));
-                        }
-                    });
-                }
             });
+        if show_profiles {
+            self.navigate(Page::Profiles);
+        }
     }
 
     fn profiles_ui(&mut self, ui: &mut Ui) {
-        show_notice(ui, self.notice.as_ref());
+        let mut retry = false;
+        if let Some(error) = &self.store_error {
+            workspace::empty(ui, "Couldn’t load profiles", error, |ui| {
+                retry = ui
+                    .add_enabled(!self.writing, Button::new("Try again"))
+                    .clicked();
+            });
+        }
+        if retry {
+            self.load_profiles(ui.ctx());
+        }
         if self.profiles.is_empty() {
             if self.writing {
                 skeleton(ui, "profiles", ["Device", "Imported from", ""]);
-            } else {
+            } else if self.store_error.is_none() {
                 let mut open_import = false;
                 workspace::empty(
                     ui,
                     "No saved profiles",
-                    "Import settings to create a profile.",
+                    "Import settings to add device profiles to this library.",
                     |ui| {
                         open_import = ui.add(primary("Import settings")).clicked();
                     },
@@ -424,13 +350,10 @@ impl OpenOptions {
             }
             return;
         }
-        ui.horizontal(|ui| {
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(title("Saved imports", 17.));
             workspace::search(ui, &mut self.profile_query, "Search profiles");
-            workspace::trailing(ui, |ui| {
-                if ui.add(primary("Import settings")).clicked() {
-                    self.navigate(Page::Import);
-                }
-            });
         });
 
         let query = self.profile_query.trim().to_lowercase();
@@ -438,14 +361,22 @@ impl OpenOptions {
             .profiles
             .iter()
             .filter(|(kind, profile)| {
-                matches_query(&query, &[self.profile_name(profile, *kind), kind.name()])
+                matches_query(
+                    &query,
+                    &[
+                        self.profile_name(profile, *kind),
+                        &profile.device_name,
+                        &profile.device_key,
+                        kind.name(),
+                    ],
+                )
             })
             .peekable();
         if rows.peek().is_none() {
             workspace::empty(
                 ui,
                 "No matching profiles",
-                "Try a different name or source.",
+                "Search by device, source, or profile identifier.",
                 |ui| {
                     if ui.button("Clear search").clicked() {
                         self.profile_query.clear();
@@ -459,29 +390,34 @@ impl OpenOptions {
         workspace::index(
             ui,
             "profiles",
-            ["Device", "Imported from", ""],
+            ["Device", "Imported from", "Assignments"],
             0.,
             |ui, columns| {
                 for (index, (kind, profile)) in rows.enumerate() {
                     if index > 0 {
                         workspace::divider(ui);
                     }
-                    columns.row(
-                        ui,
-                        |ui| {
-                            if workspace::row_title(
-                                ui,
-                                self.profile_name(profile, *kind),
-                                Icon::Profiles,
-                            ) {
-                                selected = Some(Detail::Profile(*kind, profile.clone()));
-                            }
-                        },
-                        |ui| {
-                            clipped(ui, muted(kind.name()), kind.name());
-                        },
-                        |_| {},
-                    );
+                    ui.push_id((&profile.device_key, index), |ui| {
+                        columns.row(
+                            ui,
+                            |ui| {
+                                if workspace::row_title(
+                                    ui,
+                                    self.profile_name(profile, *kind),
+                                    Icon::Profiles,
+                                ) {
+                                    selected = Some(Detail::Profile(*kind, profile.clone()));
+                                }
+                            },
+                            |ui| {
+                                clipped(ui, muted(kind.name()), kind.name());
+                            },
+                            |ui| {
+                                let count = assignment_count(profile).to_string();
+                                clipped(ui, muted(&count), &count);
+                            },
+                        );
+                    });
                 }
             },
         );
@@ -496,7 +432,13 @@ impl OpenOptions {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.label(title(self.profile_name(profile, kind), 23.));
-                ui.label(muted(format!("Imported from {}", kind.name())));
+                ui.label(muted(format!(
+                    "Imported from {} · {}",
+                    kind.name(),
+                    assignment_summary(assignment_count(profile))
+                )));
+                profile_identity(ui, profile);
+                workspace::divider(ui);
                 profile_sections(ui, profile);
             });
     }
@@ -521,7 +463,7 @@ impl OpenOptions {
     }
 }
 
-fn matches_query(query: &str, values: &[&str]) -> bool {
+pub(super) fn matches_query(query: &str, values: &[&str]) -> bool {
     query.is_empty()
         || values
             .iter()
@@ -551,142 +493,41 @@ fn show_notice(ui: &mut Ui, notice: Option<&Notice>) {
     });
 }
 
-fn device_tile(ui: &mut Ui, device: &Device, width: f32) -> bool {
-    let (_, response) = ui.allocate_exact_size(egui::vec2(width, 230.), egui::Sense::click());
-    let rect = response.rect;
-    let painter = ui.painter_at(rect);
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &device.name));
-    painter.rect(
-        rect.shrink(1.),
-        10,
-        if response.hovered() { HOVER } else { SURFACE },
-        line(),
-        egui::StrokeKind::Inside,
-    );
-    let illustration = egui::Rect::from_center_size(
-        rect.center_top() + egui::vec2(0., 88.),
-        egui::Vec2::splat(107.),
-    );
-    if device.product_id == 0xB034 {
-        mx_master(&painter, illustration);
+fn source_file(source: &Source) -> String {
+    source
+        .path
+        .file_name()
+        .unwrap_or(source.path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn assignment_count(profile: &Profile) -> usize {
+    profile
+        .settings
+        .buttons
+        .values()
+        .map(|binding| match binding {
+            Binding::Click(_) => 1,
+            Binding::Gesture(directions) => directions.len(),
+        })
+        .sum()
+}
+
+fn assignment_summary(count: usize) -> String {
+    let noun = if count == 1 {
+        "assignment"
     } else {
-        paint_icon(&painter, illustration, device_icon(device), MUTED);
-    }
-    let details = rect.left_bottom() + egui::vec2(17., -61.);
-    let mut name: String = device.name.chars().take(30).collect();
-    if device.name.chars().count() > 30 {
-        name.push('…');
-    }
-    painter.text(
-        details,
-        egui::Align2::LEFT_TOP,
-        name,
-        egui::FontId::proportional(16.),
-        TEXT,
-    );
-    let (connection, color) = if device.connected {
-        ("Connected", SUCCESS)
-    } else {
-        ("Disconnected", MUTED)
+        "assignments"
     };
-    painter.circle_filled(details + egui::vec2(4., 34.), 3.5, color);
-    painter.text(
-        details + egui::vec2(14., 34.),
-        egui::Align2::LEFT_CENTER,
-        format!("{connection} · {}", device.connection),
-        egui::FontId::proportional(12.),
-        MUTED,
-    );
-    if let Ok(Some(battery)) = device.battery {
-        painter.text(
-            rect.right_bottom() - egui::vec2(17., 27.),
-            egui::Align2::RIGHT_CENTER,
-            battery_caption(battery),
-            egui::FontId::proportional(12.),
-            MUTED,
-        );
-    }
-    paint_focus(ui, &response);
-    response.on_hover_text(&device.name).clicked()
+    format!("{count} {noun}")
 }
 
-pub(super) fn battery_caption(battery: Battery) -> String {
-    match battery {
-        Battery::Percent(value) => format!("Battery {value}%"),
-        Battery::Full => "Battery full".into(),
-        Battery::Good => "Battery good".into(),
-        Battery::Low => "Battery low".into(),
-        Battery::Critical => "Battery critical".into(),
-        Battery::Charging => "Charging".into(),
-    }
-}
-
-fn mx_master(painter: &egui::Painter, rect: egui::Rect) {
-    let center = rect.center();
-    let p = |x, y| center + egui::vec2(x, y) * (rect.height() / 100.);
-    let body = [
-        (-32., -29.),
-        (-23., -45.),
-        (-10., -50.),
-        (7., -50.),
-        (21., -45.),
-        (32., -35.),
-        (38., -19.),
-        (40., 0.),
-        (37., 19.),
-        (31., 34.),
-        (18., 44.),
-        (2., 49.),
-        (-14., 48.),
-        (-32., 40.),
-        (-44., 25.),
-        (-44., 12.),
-        (-38., -4.),
-        (-35., -17.),
-    ];
-    let fill = egui::Color32::from_rgb(47, 48, 54);
-    let edge = egui::Color32::from_rgb(76, 78, 85);
-    painter.add(egui::Shape::convex_polygon(
-        body.into_iter().map(|(x, y)| p(x, y)).collect(),
-        fill,
-        egui::Stroke::new(1.0_f32, edge),
-    ));
-    painter.add(egui::Shape::line(
-        vec![
-            p(-33., -10.),
-            p(-19., -6.),
-            p(-3., -3.),
-            p(18., -7.),
-            p(37., -15.),
-        ],
-        egui::Stroke::new(1.0_f32, edge),
-    ));
-    painter.line_segment(
-        [p(-4., -48.), p(-2., -3.)],
-        egui::Stroke::new(1.0_f32, edge),
-    );
-    let wheel = egui::Rect::from_two_pos(p(-9., -39.), p(3., -17.));
-    painter.rect_filled(wheel, 5, egui::Color32::from_gray(133));
-    for y in [-35., -31., -27., -23.] {
-        painter.line_segment([p(-7., y), p(1., y)], egui::Stroke::new(0.9_f32, fill));
-    }
-    painter.rect_filled(egui::Rect::from_two_pos(p(-7., -13.), p(1., -5.)), 3, edge);
-    painter.line_segment(
-        [p(-30., 7.), p(-35., 21.)],
-        egui::Stroke::new(2.0_f32, edge),
-    );
-    painter.circle_filled(p(-2., 5.), 1.2, egui::Color32::from_rgb(92, 156, 131));
-}
-
-fn device_icon(device: &Device) -> Icon {
-    let name = device.name.to_ascii_lowercase();
-    if name.contains("keyboard") || name.contains("keys") {
-        Icon::Keyboard
-    } else if name.contains("mouse") || name.contains("master") || name.contains("anywhere") {
-        Icon::Mouse
-    } else {
-        Icon::Device
+fn profile_identity(ui: &mut Ui, profile: &Profile) {
+    if !profile.device_key.is_empty() {
+        ui.collapsing("Imported device identity", |ui| {
+            ui.label(muted(&profile.device_key));
+        });
     }
 }
 
