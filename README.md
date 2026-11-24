@@ -32,6 +32,16 @@ cargo run --locked
 cargo test --locked --all-targets
 ```
 
+## Desktop UI
+
+Use the shared palette, typography, and controls in `src/app/theme.rs`. New
+lists can use the workspace header, toolbar, and index rows in
+`src/app/workspace.rs`. Keep collection navigation in the sidebar and place
+item actions in the workspace header or the relevant row.
+
 ## Credits
 
 [OpenLogi](https://github.com/AprilNEA/OpenLogi) inspired this project.
+The desktop layout takes inspiration from Prathamesh’s
+[shared index](https://github.com/quaylabshq/orka/pull/198) and
+[detail layouts](https://github.com/quaylabshq/orka/pull/72) for Orka.

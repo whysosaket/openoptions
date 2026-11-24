@@ -8,11 +8,17 @@ mod app;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    let viewport = egui::ViewportBuilder::default()
+        .with_app_id("io.github.whysosaket.openoptions")
+        .with_inner_size([1080., 720.])
+        .with_min_inner_size([650., 470.]);
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_title_shown(false)
+        .with_titlebar_shown(false)
+        .with_fullsize_content_view(true);
     let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_app_id("io.github.whysosaket.openoptions")
-            .with_inner_size([1080., 720.])
-            .with_min_inner_size([650., 470.]),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };

@@ -7,12 +7,19 @@ use std::sync::mpsc::{self, Receiver, Sender};
 mod action_labels;
 mod theme;
 mod ui;
+mod workspace;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Devices,
     Import,
     Profiles,
+}
+
+#[derive(Clone)]
+enum Detail {
+    Device(Device),
+    Profile(SourceKind, Profile),
 }
 
 type Saved = Vec<(SourceKind, Profile)>;
@@ -30,6 +37,9 @@ enum Notice {
 
 pub struct OpenOptions {
     page: Page,
+    detail: Option<Detail>,
+    device_query: String,
+    profile_query: String,
     sender: Sender<Event>,
     events: Receiver<Event>,
     scanning: bool,
@@ -39,7 +49,6 @@ pub struct OpenOptions {
     reading: bool,
     preview: Option<(Source, Preview)>,
     notice: Option<Notice>,
-    mouse_art: Option<egui::TextureHandle>,
     writing: bool,
     profiles: Saved,
 }
@@ -50,6 +59,9 @@ impl OpenOptions {
         let (sender, events) = mpsc::channel();
         let mut app = Self {
             page: Page::Devices,
+            detail: None,
+            device_query: String::new(),
+            profile_query: String::new(),
             sender,
             events,
             scanning: false,
@@ -59,7 +71,6 @@ impl OpenOptions {
             reading: false,
             preview: None,
             notice: None,
-            mouse_art: ui::load_mouse_art(context),
             writing: true,
             profiles: Vec::new(),
         };
@@ -148,7 +159,7 @@ impl OpenOptions {
                                 } else {
                                     format!(
                                         "Saved {}. View them in Profiles.",
-                                        ui::profile_count(count)
+                                        workspace::profile_count(count)
                                     )
                                 }));
                             }
