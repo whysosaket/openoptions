@@ -1,4 +1,4 @@
-use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
+use eframe::egui::{Pos2, Rect, Vec2, pos2};
 
 pub(super) fn overlay_origin(pointer: Pos2, screen: Option<Rect>, scale: f32, edge: f32) -> Pos2 {
     let scale = scale.max(f32::EPSILON);
@@ -60,7 +60,7 @@ pub(super) fn containing_screen(pointer: (i32, i32)) -> Option<Rect> {
     let bounds = unsafe { CGDisplayBounds(display) };
     Some(Rect::from_min_size(
         pos2(bounds.origin.x as f32, bounds.origin.y as f32),
-        vec2(bounds.size.width as f32, bounds.size.height as f32),
+        Vec2::new(bounds.size.width as f32, bounds.size.height as f32),
     ))
 }
 
@@ -108,7 +108,7 @@ pub(super) fn containing_screen(pointer: (i32, i32)) -> Option<Rect> {
         for screen in reply.screen_info {
             let rect = Rect::from_min_size(
                 pos2(f32::from(screen.x_org), f32::from(screen.y_org)),
-                vec2(f32::from(screen.width), f32::from(screen.height)),
+                Vec2::new(f32::from(screen.width), f32::from(screen.height)),
             );
             if rect.contains(point) {
                 return Some(rect);
@@ -118,7 +118,7 @@ pub(super) fn containing_screen(pointer: (i32, i32)) -> Option<Rect> {
     let root = connection.setup().roots.get(screen)?;
     Some(Rect::from_min_size(
         Pos2::ZERO,
-        vec2(
+        Vec2::new(
             f32::from(root.width_in_pixels),
             f32::from(root.height_in_pixels),
         ),
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn overlay_clamps_on_the_display_with_a_negative_origin() {
-        let display = Rect::from_min_size(pos2(-1440., 0.), vec2(1440., 900.));
+        let display = Rect::from_min_size(pos2(-1440., 0.), Vec2::new(1440., 900.));
         assert_eq!(
             overlay_origin(pos2(-1438., 898.), Some(display), 1., 288.),
             pos2(-1440., 612.)
