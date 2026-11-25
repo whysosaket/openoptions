@@ -7,10 +7,14 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 mod action_labels;
+mod action_picker;
+mod applications;
 mod controls;
 mod feature_panels;
 mod gallery;
 mod pairing;
+mod screen;
+mod settings;
 mod theme;
 mod ui;
 mod workspace;
@@ -20,6 +24,7 @@ enum Page {
     Devices,
     Import,
     Profiles,
+    Settings,
 }
 
 #[derive(Clone)]

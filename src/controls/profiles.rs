@@ -91,7 +91,7 @@ impl Profiles {
     }
 }
 
-fn application_id(path: &Path) -> Option<String> {
+pub fn application_id(path: &Path) -> Option<String> {
     if !path.is_absolute() {
         return None;
     }
