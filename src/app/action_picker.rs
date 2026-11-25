@@ -43,11 +43,11 @@ pub(super) fn action_picker(
 ) -> Option<Option<Action>> {
     let caption = current.map_or_else(|| menu.default.into(), action_name);
     ui.label(title(menu.heading, 13.));
-    if ui
+    let opener = ui
         .add(Button::new(format!("{caption}  ›")).truncate())
-        .on_hover_text("Choose an assignment")
-        .clicked()
-    {
+        .on_hover_text(format!("{caption}\nChoose an assignment"));
+    paint_focus(ui, &opener);
+    if opener.clicked() {
         *picker = Some(ActionPicker {
             focus: true,
             ..ActionPicker::default()
@@ -83,6 +83,7 @@ pub(super) fn action_picker(
         });
     if modal.inner.is_some() || modal.should_close() {
         *picker = None;
+        opener.request_focus();
     }
     modal.inner
 }
@@ -106,65 +107,66 @@ impl ActionPicker {
         let mut result = None;
         let mut rendered = false;
         let matches = |label: &str| label.to_lowercase().contains(&query);
-        ScrollArea::vertical()
+        let mut results = ScrollArea::vertical()
             .id_salt(menu.id.with("actions"))
-            .max_height((ui.ctx().content_rect().height() - 220.).clamp(140., 290.))
-            .show(ui, |ui| {
-                let mut option = |label: &str, action: Option<Action>| {
-                    if matches(label) {
-                        rendered = true;
-                        if ui
-                            .selectable_label(current == action.as_ref(), label)
-                            .clicked()
-                        {
-                            result = Some(action);
-                        }
-                    }
-                };
-                option(menu.default, None);
-                for name in NamedAction::ALL {
-                    let action = Action::Named(name);
-                    if controls::supports(&action) {
-                        let label = action_label(&action).to_owned();
-                        option(&label, Some(action));
+            .max_height((ui.ctx().content_rect().height() - 220.).clamp(140., 290.));
+        if search.changed() {
+            results = results.vertical_scroll_offset(0.);
+        }
+        results.show(ui, |ui| {
+            let mut option = |label: &str, action: Option<Action>| {
+                if matches(label) {
+                    rendered = true;
+                    if ui
+                        .selectable_label(current == action.as_ref(), label)
+                        .clicked()
+                    {
+                        result = Some(action);
                     }
                 }
-                if menu.show_ring {
-                    option("Show Actions Ring", Some(Action::ShowActionsRing));
+            };
+            option(menu.default, None);
+            for name in NamedAction::ALL {
+                let action = Action::Named(name);
+                if controls::supports(&action) {
+                    let label = action_label(&action).to_owned();
+                    option(&label, Some(action));
                 }
-                if let Some(hosts) = menu.hosts.filter(|hosts| hosts.can_switch) {
-                    for host in hosts.slots.iter().filter(|host| host.paired) {
-                        let action = Action::SwitchHost(host.index);
-                        option(&action_name(&action), Some(action));
+            }
+            if menu.show_ring {
+                option("Show Actions Ring", Some(Action::ShowActionsRing));
+            }
+            if let Some(hosts) = menu.hosts.filter(|hosts| hosts.can_switch) {
+                for host in hosts.slots.iter().filter(|host| host.paired) {
+                    let action = Action::SwitchHost(host.index);
+                    option(&action_name(&action), Some(action));
+                }
+            }
+            for (label, mode) in [
+                ("Keyboard shortcut…", Mode::Shortcut),
+                ("Open application…", Mode::Application),
+            ] {
+                if matches(label) {
+                    rendered = true;
+                    if ui.button(label).clicked() {
+                        self.mode = mode;
+                        self.value = match current {
+                            Some(Action::Shortcut(value)) if mode == Mode::Shortcut => {
+                                value.clone()
+                            }
+                            Some(Action::OpenApplication(value)) if mode == Mode::Application => {
+                                value.clone()
+                            }
+                            _ => String::new(),
+                        };
+                        self.focus = true;
                     }
                 }
-                for (label, mode) in [
-                    ("Keyboard shortcut…", Mode::Shortcut),
-                    ("Open application…", Mode::Application),
-                ] {
-                    if matches(label) {
-                        rendered = true;
-                        if ui.button(label).clicked() {
-                            self.mode = mode;
-                            self.value = match current {
-                                Some(Action::Shortcut(value)) if mode == Mode::Shortcut => {
-                                    value.clone()
-                                }
-                                Some(Action::OpenApplication(value))
-                                    if mode == Mode::Application =>
-                                {
-                                    value.clone()
-                                }
-                                _ => String::new(),
-                            };
-                            self.focus = true;
-                        }
-                    }
-                }
-                if !rendered {
-                    ui.label(muted("No matching actions."));
-                }
-            });
+            }
+            if !rendered {
+                ui.label(muted("No matching actions."));
+            }
+        });
         result
     }
 

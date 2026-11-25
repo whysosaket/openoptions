@@ -106,51 +106,54 @@ impl AppPicker {
         }
 
         let query = self.query.trim().to_lowercase();
-        ScrollArea::vertical()
+        let mut results = ScrollArea::vertical()
             .id_salt("installed-apps")
-            .max_height((ui.ctx().content_rect().height() - 254.).clamp(96., 236.))
-            .show(ui, |ui| {
-                let mut found = false;
-                for app in &self.apps {
-                    if !super::ui::matches_query(&query, &[&app.name, &app.path]) {
-                        continue;
+            .max_height((ui.ctx().content_rect().height() - 254.).clamp(96., 236.));
+        if search.changed() {
+            results = results.vertical_scroll_offset(0.);
+        }
+        results.show(ui, |ui| {
+            let mut found = false;
+            for app in &self.apps {
+                if !super::ui::matches_query(&query, &[&app.name, &app.path]) {
+                    continue;
+                }
+                found = true;
+                let configured = profiles.applications.contains_key(&app.identity);
+                let available = std::path::Path::new(&app.path).is_dir();
+                let caption = if configured {
+                    format!("{} · Already configured", app.name)
+                } else if !available {
+                    format!("{} · Unavailable", app.name)
+                } else {
+                    app.name.clone()
+                };
+                ui.push_id(&app.identity, |ui| {
+                    if ui
+                        .add_enabled(
+                            available && !configured,
+                            Button::new(caption)
+                                .selected(self.path == app.path)
+                                .truncate(),
+                        )
+                        .on_hover_text(&app.path)
+                        .clicked()
+                    {
+                        self.path = app.path.clone();
+                        self.error = None;
                     }
-                    found = true;
-                    let configured = profiles.applications.contains_key(&app.identity);
-                    let available = std::path::Path::new(&app.path).is_dir();
-                    let caption = if configured {
-                        format!("{} · Already configured", app.name)
-                    } else if !available {
-                        format!("{} · Unavailable", app.name)
-                    } else {
-                        app.name.clone()
-                    };
-                    ui.push_id(&app.identity, |ui| {
-                        if ui
-                            .add_enabled(
-                                available && !configured,
-                                Button::new(caption)
-                                    .selected(self.path == app.path)
-                                    .truncate(),
-                            )
-                            .on_hover_text(&app.path)
-                            .clicked()
-                        {
-                            self.path = app.path.clone();
-                            self.error = None;
-                        }
-                        ui.add(egui::Label::new(muted(&app.path).size(11.)).truncate())
-                            .on_hover_text(&app.path);
-                    });
-                }
-                if !found {
-                    ui.label(muted(if self.apps.is_empty() {
-                        "No applications found. Enter the path below."
-                    } else {
-                        "No matching applications."
-                    }));
-                }
-            });
+                    ui.add(egui::Label::new(muted(&app.path).size(11.)).truncate())
+                        .on_hover_text(&app.path);
+                });
+            }
+            if !found {
+                ui.label(muted(if self.apps.is_empty() {
+                    "No applications found. Enter the path below."
+                } else {
+                    "No matching applications."
+                }));
+            }
+        });
     }
 }
 

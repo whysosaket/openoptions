@@ -122,10 +122,10 @@ pub(super) fn ring_preview(ui: &mut Ui, actions: &Ring) -> bool {
     ring(ui, actions, None, RING_EDGE, false).0.is_some()
 }
 
-pub(super) fn ring_editor(ui: &mut Ui, actions: &Ring, selected: &mut usize) {
+pub(super) fn ring_editor(ui: &mut Ui, actions: &Ring, selected: &mut usize, max_edge: f32) {
     card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let edge = ui.available_width().clamp(180., RING_EDGE);
+        let edge = ui.available_width().min(max_edge);
         ui.vertical_centered(|ui| {
             if let Some(index) = ring(ui, actions, Some(*selected), edge, false).0 {
                 *selected = index;
@@ -221,14 +221,21 @@ fn ring(
         }
         let focus = response.has_focus();
         if active || response.hovered() || focus {
-            center_label = Some(name.chars().take(22).collect());
+            center_label = Some(name);
         }
         let tone = if active || response.hovered() || focus {
             FOCUS
         } else {
             BORDER
         };
-        painter.circle_filled(point, bubble, if active { SOLID } else { ELEVATED });
+        let fill = if active {
+            SOLID
+        } else if action.is_some() {
+            HOVER
+        } else {
+            ELEVATED
+        };
+        painter.circle_filled(point, bubble, fill);
         painter.circle_stroke(
             point,
             bubble,
@@ -243,7 +250,7 @@ fn ring(
             point,
             Align2::CENTER_CENTER,
             glyph,
-            egui::FontId::proportional(15.),
+            egui::FontId::proportional((edge * 0.065).clamp(10., 15.)),
             if active { Color32::WHITE } else { TEXT },
         );
         if focus {
@@ -251,13 +258,12 @@ fn ring(
         }
     }
     if let Some(label) = center_label {
-        painter.text(
-            center,
-            Align2::CENTER_CENTER,
-            label,
-            egui::FontId::proportional(12.),
-            TEXT,
-        );
+        let width = (radius - bubble) * 2. - 8.;
+        let mut layout =
+            egui::text::LayoutJob::simple(label, egui::FontId::proportional(12.), TEXT, width);
+        layout.wrap.max_rows = 1;
+        let text = painter.layout_job(layout);
+        painter.galley(center - text.size() * 0.5, text, TEXT);
     }
     let outside = ui.input(|input| {
         input.pointer.any_click()

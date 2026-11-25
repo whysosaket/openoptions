@@ -172,11 +172,17 @@ impl OpenOptions {
     }
 
     fn import_sources(&mut self, ui: &mut Ui) {
+        show_notice(ui, self.notice.as_ref());
+        if self.reading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Reading settings…");
+            });
+        }
         ScrollArea::vertical()
             .id_salt("import sources")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                show_notice(ui, self.notice.as_ref());
                 let busy = self.reading || self.writing;
                 let mut selected = None;
                 ui.label(title("Discovered settings", 17.));
@@ -241,12 +247,6 @@ impl OpenOptions {
                 });
                 if let Some(source) = selected {
                     self.read(source, ui.ctx());
-                }
-                if self.reading {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(muted("Reading settings…"));
-                    });
                 }
             });
     }
