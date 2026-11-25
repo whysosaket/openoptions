@@ -7,6 +7,7 @@ pub(super) const WINDOW: Color32 = Color32::from_rgb(244, 244, 246);
 pub(super) const SURFACE: Color32 = Color32::WHITE;
 pub(super) const ELEVATED: Color32 = Color32::from_rgb(250, 250, 251);
 pub(super) const HOVER: Color32 = Color32::from_rgb(232, 240, 253);
+const PRESSED: Color32 = Color32::from_rgb(214, 228, 252);
 pub(super) const BORDER: Color32 = Color32::from_rgb(217, 217, 224);
 pub(super) const TEXT: Color32 = Color32::from_rgb(26, 26, 29);
 pub(super) const MUTED: Color32 = Color32::from_rgb(101, 101, 112);
@@ -64,8 +65,8 @@ pub(super) fn install(context: &Context) {
     visuals.widgets.noninteractive.bg_stroke.color = BORDER;
     for (visual, fill, stroke) in [
         (&mut visuals.widgets.inactive, ELEVATED, BORDER),
-        (&mut visuals.widgets.hovered, HOVER, BORDER),
-        (&mut visuals.widgets.active, HOVER, FOCUS),
+        (&mut visuals.widgets.hovered, HOVER, FOCUS),
+        (&mut visuals.widgets.active, PRESSED, FOCUS),
         (&mut visuals.widgets.open, ELEVATED, BORDER),
     ] {
         visual.bg_fill = fill;
@@ -223,10 +224,10 @@ pub(super) fn labeled_button(
     let glyph = Atom::custom(egui::Id::new("control icon"), vec2(15., 15.));
     ui.add_enabled_ui(enabled, |ui| {
         let result = Button::new((glyph, label)).gap(7.).atom_ui(ui);
-        let color = if enabled { MUTED } else { FOCUS };
         for (_, rect) in result.custom_rects() {
-            paint_icon(ui.painter(), rect, kind, color);
+            paint_icon(ui.painter(), rect, kind, MUTED);
         }
+        paint_focus(ui, &result.response);
         result.response
     })
     .inner

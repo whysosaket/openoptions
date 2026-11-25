@@ -445,53 +445,24 @@ fn settings_workspace(
             || pointer.dpi_error.is_some()
             || pointer.wheel_error.is_some()
     });
-    let rail = if ui.available_width() < 690. {
-        128.
-    } else {
-        154.
-    };
+    let compact = ui.available_width() < 690.;
+    if compact {
+        ui.horizontal_wrapped(|ui| {
+            section_navigation(ui, editor, &available, pointer_supported, false)
+        });
+        workspace::divider(ui);
+    }
     ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            vec2(rail, ui.available_height()),
-            Layout::top_down(Align::Min),
-            |ui| {
-                ui.spacing_mut().item_spacing.y = 5.;
-                for section in [
-                    Section::Buttons,
-                    Section::Keys,
-                    Section::Ring,
-                    Section::Pointer,
-                    Section::Device,
-                ] {
-                    let show = match section {
-                        Section::Buttons => {
-                            available.is_empty() || available.iter().any(|control| control.mouse)
-                        }
-                        Section::Keys => available.iter().any(|control| !control.mouse),
-                        Section::Ring => !available.is_empty(),
-                        Section::Pointer => pointer_supported || editor.section == Section::Pointer,
-                        Section::Device => true,
-                    };
-                    if !show {
-                        continue;
-                    }
-                    if ui
-                        .add_sized(
-                            [rail, 33.],
-                            Button::selectable(editor.section == section, section.label()),
-                        )
-                        .clicked()
-                    {
-                        editor.section = section;
-                        editor.selected = None;
-                        editor.entry = None;
-                    }
-                }
-            },
-        );
-        ui.add_space(10.);
-        ui.separator();
-        ui.add_space(12.);
+        if !compact {
+            ui.allocate_ui_with_layout(
+                vec2(144., ui.available_height()),
+                Layout::top_down(Align::Min),
+                |ui| section_navigation(ui, editor, &available, pointer_supported, true),
+            );
+            ui.add_space(8.);
+            ui.separator();
+            ui.add_space(8.);
+        }
         ui.vertical(|ui| {
             ui.set_width(ui.available_width());
             if editor.section != Section::Device {
@@ -622,42 +593,16 @@ fn settings_workspace(
                 }
                 return;
             }
-            ui.horizontal_wrapped(|ui| {
-                ui.label(title(editor.section.label(), 23.));
-                if owns_session && let Some(live) = live {
-                    let text = if live.stopping {
-                        "Disabling…"
-                    } else if live.active {
-                        "Live"
-                    } else {
-                        "Enabling…"
-                    };
-                    workspace::badge(ui, text, live.active && !live.stopping);
-                    if live.active && !live.stopping {
-                        let name = live
-                            .active_application
-                            .as_ref()
-                            .and_then(|key| editor.draft.applications.get(key))
-                            .map_or("Default", |profile| profile.name.as_str());
-                        ui.label(muted(format!("Active profile · {name}")));
+            let preview = ui
+                .horizontal_wrapped(|ui| {
+                    ui.label(title(editor.section.label(), 23.));
+                    if ui
+                        .add_enabled(editable && editor.changed(), primary("Save"))
+                        .clicked()
+                    {
+                        command = Some(Command::Save);
                     }
-                }
-            });
-            let instruction = match editor.section {
-                Section::Buttons => "Choose a button to assign a press or a gesture.",
-                Section::Keys => "Choose a key to change what it does.",
-                Section::Ring => "Choose one of the eight slots to assign an action.",
-                Section::Device | Section::Pointer => unreachable!(),
-            };
-            ui.label(muted(instruction));
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(editable && editor.changed(), primary("Save"))
-                    .clicked()
-                {
-                    command = Some(Command::Save);
-                }
-                if !owns_session
+                    if !owns_session
                     && ui
                         .add_enabled(
                             editable
@@ -676,55 +621,147 @@ fn settings_workspace(
                 {
                     command = Some(Command::Enable);
                 }
-                if editor.saving || editor.loading {
-                    ui.spinner();
-                }
-            });
+                    if editor.saving || editor.loading {
+                        ui.spinner();
+                    }
+                    if editor.section == Section::Ring {
+                        let preview = ui.button("Preview ring");
+                        paint_focus(ui, &preview);
+                        if preview.clicked() {
+                            editor.ring_preview = true;
+                        }
+                        if editor.ring_preview {
+                            return Some(preview);
+                        }
+                    }
+                    None
+                })
+                .inner;
+            if owns_session && let Some(live) = live {
+                let text = if live.stopping {
+                    "Disabling…"
+                } else if live.active {
+                    "Live"
+                } else {
+                    "Enabling…"
+                };
+                ui.horizontal_wrapped(|ui| {
+                    workspace::badge(ui, text, live.active && !live.stopping);
+                    if live.active && !live.stopping {
+                        let name = live
+                            .active_application
+                            .as_ref()
+                            .and_then(|key| editor.draft.applications.get(key))
+                            .map_or("Default", |profile| profile.name.as_str());
+                        clipped(ui, muted(format!("Active profile · {name}")), name);
+                    }
+                });
+            }
             if !controls::live_platform_available() {
                 ui.label(muted("Live controls require an X11 session on Linux."));
             }
             profile_tabs(ui, editor, editable);
             if editor.section == Section::Ring {
-                ring_workspace(ui, editor, editable);
+                ring_workspace(ui, editor, editable, preview);
                 return;
             }
-            let control_area = ui.available_height().max(100.);
-            ScrollArea::vertical()
-                .id_salt(("control-settings", device.key()))
-                .max_height(control_area)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    if editor.section == Section::Buttons && editor.application.is_none() {
-                        ui.add_enabled_ui(editable, |ui| {
-                            profile_picker(ui, editor, device, profiles, &available)
+            if editor.section == Section::Buttons && editor.application.is_none() {
+                ui.add_enabled_ui(editable, |ui| {
+                    profile_picker(ui, editor, device, profiles, &available)
+                });
+            }
+            let controls: Vec<_> = available
+                .iter()
+                .copied()
+                .filter(|control| editor.section.accepts(*control))
+                .collect();
+            if editor
+                .selected
+                .is_some_and(|selected| !controls.iter().any(|control| control.id == selected))
+            {
+                editor.selected = None;
+                editor.entry = None;
+            }
+            let control_area = ui.available_height().max(60.);
+            let section = editor.section.label();
+            let key = device.key();
+            if ui.available_width() >= 500. {
+                let diagram =
+                    control_area >= 315. && device.name.to_lowercase().contains("mx master 3");
+                let selected = editor.selected;
+                ui.columns(2, |columns| {
+                    ScrollArea::vertical()
+                        .id_salt(("control-list", &key, section))
+                        .max_height(control_area)
+                        .auto_shrink([false, false])
+                        .show(&mut columns[0], |ui| {
+                            control_list(ui, editor, &controls, diagram)
                         });
+                    let mut inspector_scroll = ScrollArea::vertical()
+                        .id_salt(("control-inspector", &key, section))
+                        .max_height(control_area)
+                        .auto_shrink([false, false]);
+                    if editor.selected != selected {
+                        inspector_scroll = inspector_scroll.vertical_scroll_offset(0.);
                     }
-                    let controls: Vec<_> = available
-                        .into_iter()
-                        .filter(|control| editor.section.accepts(*control))
-                        .collect();
-                    if editor.selected.is_some_and(|selected| {
-                        !controls.iter().any(|control| control.id == selected)
-                    }) {
-                        editor.selected = None;
-                        editor.entry = None;
-                    }
-                    let diagram = ui.available_width() >= 540.
-                        && device.name.to_lowercase().contains("mx master 3");
-                    if ui.available_width() >= 540. {
-                        ui.columns(2, |columns| {
-                            control_list(&mut columns[0], editor, &controls, diagram);
-                            columns[1]
-                                .add_enabled_ui(editable, |ui| inspector(ui, editor, &controls));
-                        });
-                    } else {
+                    inspector_scroll.show(&mut columns[1], |ui| {
+                        ui.add_enabled_ui(editable, |ui| inspector(ui, editor, &controls));
+                    });
+                });
+            } else {
+                ScrollArea::vertical()
+                    .id_salt(("control-settings", &key, section))
+                    .max_height(control_area)
+                    .show(ui, |ui| {
                         control_list(ui, editor, &controls, false);
                         ui.add_enabled_ui(editable, |ui| inspector(ui, editor, &controls));
-                    }
-                });
+                    });
+            }
         });
     });
     command
+}
+
+fn section_navigation(
+    ui: &mut Ui,
+    editor: &mut Editor,
+    available: &[Control],
+    pointer_supported: bool,
+    sidebar: bool,
+) {
+    ui.spacing_mut().item_spacing.y = 5.;
+    for section in [
+        Section::Buttons,
+        Section::Keys,
+        Section::Ring,
+        Section::Pointer,
+        Section::Device,
+    ] {
+        let show = match section {
+            Section::Buttons => {
+                available.is_empty() || available.iter().any(|control| control.mouse)
+            }
+            Section::Keys => available.iter().any(|control| !control.mouse),
+            Section::Ring => !available.is_empty(),
+            Section::Pointer => pointer_supported || editor.section == Section::Pointer,
+            Section::Device => true,
+        };
+        if !show {
+            continue;
+        }
+        let button = Button::selectable(editor.section == section, section.label());
+        let response = if sidebar {
+            ui.add_sized([ui.available_width(), 33.], button)
+        } else {
+            ui.add(button)
+        };
+        paint_focus(ui, &response);
+        if response.clicked() && editor.section != section {
+            editor.section = section;
+            editor.selected = None;
+            editor.entry = None;
+        }
+    }
 }
 
 fn pointer_workspace(
@@ -734,14 +771,17 @@ fn pointer_workspace(
     retry: bool,
 ) -> Option<Command> {
     let mut command = None;
-    ui.label(title("Point & Scroll", 23.));
-    if editor.pointer_busy || editor.loading {
-        ui.spinner();
-    }
+    let reload = ui.horizontal_wrapped(|ui| {
+        ui.label(title("Point & Scroll", 23.));
+        if editor.pointer_busy || editor.loading {
+            ui.spinner();
+        }
+        labeled_button(ui, "Read current settings", Icon::Refresh, retry).clicked()
+    });
     if let Some(error) = &editor.pointer_error {
         ui.label(RichText::new(format!("Couldn't read device settings. {error}")).color(WARNING));
     }
-    if labeled_button(ui, "Read current settings", Icon::Refresh, retry).clicked() {
+    if reload.inner {
         return Some(Command::Reload);
     }
     let pointer = editor.pointer.as_ref()?;
@@ -763,7 +803,7 @@ fn pointer_workspace(
                 let editable = editable && pointer.dpi_error.is_none();
                 card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(title("Pointer speed", 16.));
+                    let heading = ui.label(title("Pointer speed", 16.));
                     ui.label(muted(format!("Last device reading · {} DPI", dpi.current)));
                     if let Some((first, last)) = dpi.supported.first().zip(dpi.supported.last()) {
                         let mut range = format!("{first}–{last} DPI");
@@ -785,11 +825,13 @@ fn pointer_workspace(
                         .binary_search(choice)
                         .unwrap_or_else(|index| index.min(dpi.supported.len() - 1));
                     let mut index = index;
-                    let response = ui.add_enabled(
-                        editable && !editor.pointer_busy,
+                    let response = tuning_slider(
+                        ui,
                         egui::Slider::new(&mut index, 0..=(dpi.supported.len() - 1))
                             .show_value(false),
-                    );
+                        editable && !editor.pointer_busy,
+                    )
+                    .labelled_by(heading.id);
                     if response.changed() {
                         *choice = dpi.supported[index];
                     }
@@ -842,10 +884,13 @@ fn pointer_workspace(
                                 };
                             }
                             if automatic {
-                                ui.add(
-                                    egui::Slider::new(&mut choice.threshold, 1..=254)
-                                        .text("Switch threshold"),
-                                );
+                                let heading = ui.label(title("Switch threshold", 13.));
+                                tuning_slider(
+                                    ui,
+                                    egui::Slider::new(&mut choice.threshold, 1..=254),
+                                    true,
+                                )
+                                .labelled_by(heading.id);
                             }
                         }
                         let pending =
@@ -864,6 +909,24 @@ fn pointer_workspace(
             }
         });
     command
+}
+
+fn tuning_slider(ui: &mut Ui, slider: egui::Slider<'_>, enabled: bool) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 60.).clamp(80., 460.);
+        ui.spacing_mut().slider_rail_height = 5.;
+        ui.visuals_mut().widgets.inactive.bg_fill = BORDER;
+        ui.visuals_mut().selection.bg_fill = SOLID;
+        let response = ui.add_enabled(
+            enabled,
+            slider
+                .trailing_fill(true)
+                .handle_shape(egui::style::HandleShape::Circle),
+        );
+        paint_focus(ui, &response);
+        response
+    })
+    .inner
 }
 
 fn control_list(ui: &mut Ui, editor: &mut Editor, controls: &[Control], diagram: bool) {
@@ -899,11 +962,11 @@ fn control_list(ui: &mut Ui, editor: &mut Editor, controls: &[Control], diagram:
             .selected(selected)
             .frame_when_inactive(selected)
             .truncate();
-            if ui
+            let row = ui
                 .add_sized([ui.available_width(), 33.], row)
-                .on_hover_text(format!("{name}  ·  {assignment}"))
-                .clicked()
-            {
+                .on_hover_text(format!("{name}  ·  {assignment}"));
+            paint_focus(ui, &row);
+            if row.clicked() {
                 editor.select_control(control.id);
             }
         }
@@ -976,6 +1039,9 @@ fn mouse_map(ui: &mut Ui, editor: &mut Editor, controls: &[Control]) {
             5.
         };
         painter.circle(point, radius, WINDOW, egui::Stroke::new(1.4_f32, accent));
+        if focus.has_focus() {
+            painter.circle_stroke(point, radius + 3., egui::Stroke::new(2_f32, FOCUS));
+        }
         if selected {
             painter.circle_filled(point, 3.2, accent);
         }
@@ -1018,7 +1084,7 @@ fn inspector(ui: &mut Ui, editor: &mut Editor, controls: &[Control]) {
         card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(title("Control inspector", 16.));
-            ui.label(muted("Select a control to see its current assignment."));
+            ui.label(muted("Select a control to edit it."));
         });
         return;
     };
@@ -1156,29 +1222,36 @@ fn gesture_name(direction: Direction) -> &'static str {
 }
 
 fn gesture_slots(ui: &mut Ui, editor: &mut Editor, actions: &BTreeMap<Direction, Action>) {
-    for (direction, icon) in [
+    let slots = [
         (Direction::Click, "•"),
         (Direction::Up, "↑"),
         (Direction::Down, "↓"),
         (Direction::Left, "←"),
         (Direction::Right, "→"),
-    ] {
-        let action = actions
-            .get(&direction)
-            .map_or_else(|| "Unassigned".into(), action_name);
-        let label = format!("{icon} {} · {action}", gesture_name(direction));
-        if ui
-            .add_sized(
-                [ui.available_width(), 28.],
-                Button::selectable(editor.direction == direction, &label).truncate(),
-            )
-            .on_hover_text(&label)
-            .clicked()
-            && editor.direction != direction
-        {
-            editor.direction = direction;
-            editor.entry = None;
-        }
+    ];
+    let columns = if ui.available_width() >= 248. { 2 } else { 1 };
+    let width = (ui.available_width() - (columns - 1) as f32 * ui.spacing().item_spacing.x)
+        / columns as f32;
+    for row in slots.chunks(columns) {
+        ui.horizontal(|ui| {
+            for &(direction, icon) in row {
+                let action = actions
+                    .get(&direction)
+                    .map_or_else(|| "Unassigned".into(), action_name);
+                let label = format!("{icon} {} · {action}", gesture_name(direction));
+                let button = ui
+                    .add_sized(
+                        [width, 28.],
+                        Button::selectable(editor.direction == direction, &label).truncate(),
+                    )
+                    .on_hover_text(&label);
+                paint_focus(ui, &button);
+                if button.clicked() && editor.direction != direction {
+                    editor.direction = direction;
+                    editor.entry = None;
+                }
+            }
+        });
     }
 }
 
@@ -1306,6 +1379,7 @@ fn profile_matches(kind: SourceKind, profile: &Profile, device: &Device) -> bool
 }
 
 fn profile_tabs(ui: &mut Ui, editor: &mut Editor, editable: bool) {
+    let mut add_application = None;
     surface(8).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let editing = editor
@@ -1316,12 +1390,12 @@ fn profile_tabs(ui: &mut Ui, editor: &mut Editor, editable: bool) {
         ui.add(egui::Label::new(title(format!("Editing profile · {editing}"), 13.)).truncate())
             .on_hover_text(editing);
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(editable, Button::new("+ Add application"))
-                .clicked()
-            {
+            let add = ui.add_enabled(editable, Button::new("+ Add application"));
+            paint_focus(ui, &add);
+            if add.clicked() {
                 editor.app_picker = Some(AppPicker::new());
             }
+            add_application = Some(add);
             if let Some(app) = editor.application.clone() {
                 ui.add_enabled_ui(editable, |ui| {
                     ui.menu_button("Profile options", |ui| {
@@ -1348,18 +1422,26 @@ fn profile_tabs(ui: &mut Ui, editor: &mut Editor, editable: bool) {
                             editor.entry = None;
                         }
                         for (key, profile) in &editor.draft.applications {
-                            if ui
+                            let text = ui.painter().layout_no_wrap(
+                                profile.name.clone(),
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                TEXT,
+                            );
+                            let tab_width =
+                                (text.size().x + ui.spacing().button_padding.x * 2. + 2.)
+                                    .clamp(64., 192.);
+                            let tab = ui
                                 .add_sized(
-                                    [profile.name.chars().count().clamp(8, 21) as f32 * 8., 30.],
+                                    [tab_width, CONTROL_HEIGHT],
                                     Button::selectable(
                                         editor.application.as_ref() == Some(key),
                                         &profile.name,
                                     )
                                     .truncate(),
                                 )
-                                .on_hover_text(format!("{}\n{key}", profile.name))
-                                .clicked()
-                            {
+                                .on_hover_text(format!("{}\n{key}", profile.name));
+                            paint_focus(ui, &tab);
+                            if tab.clicked() {
                                 editor.application = Some(key.clone());
                                 editor.entry = None;
                             }
@@ -1369,10 +1451,17 @@ fn profile_tabs(ui: &mut Ui, editor: &mut Editor, editable: bool) {
         });
     });
 
+    let picker_was_open = editor.app_picker.is_some();
     if let Some(app) = app_picker(ui, &mut editor.app_picker, &mut editor.draft) {
         editor.application = Some(app);
         editor.entry = None;
         editor.notice = None;
+    }
+    if picker_was_open
+        && editor.app_picker.is_none()
+        && let Some(add) = add_application
+    {
+        add.request_focus();
     }
 }
 
@@ -1529,22 +1618,26 @@ fn host_workspace(
     command
 }
 
-fn ring_workspace(ui: &mut Ui, editor: &mut Editor, editable: bool) {
-    if ui.button("Preview ring").clicked() {
-        editor.ring_preview = true;
-    }
+fn ring_workspace(
+    ui: &mut Ui,
+    editor: &mut Editor,
+    editable: bool,
+    preview: Option<egui::Response>,
+) {
     let layer = editor.draft.layer_mut(editor.application.as_deref());
+    let ring_edge = (ui.available_height() - 30.).clamp(100., 288.);
     ScrollArea::vertical()
         .id_salt("actions-ring")
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            if ui.available_width() >= 600. {
+            if ui.available_width() >= 500. {
                 ui.columns(2, |columns| {
                     let previous = editor.ring_slot;
                     feature_panels::ring_editor(
                         &mut columns[0],
                         &layer.ring,
                         &mut editor.ring_slot,
+                        ring_edge,
                     );
                     if editor.ring_slot != previous {
                         editor.entry = None;
@@ -1561,7 +1654,7 @@ fn ring_workspace(ui: &mut Ui, editor: &mut Editor, editable: bool) {
                 });
             } else {
                 let previous = editor.ring_slot;
-                feature_panels::ring_editor(ui, &layer.ring, &mut editor.ring_slot);
+                feature_panels::ring_editor(ui, &layer.ring, &mut editor.ring_slot, ring_edge);
                 if editor.ring_slot != previous {
                     editor.entry = None;
                 }
@@ -1576,7 +1669,7 @@ fn ring_workspace(ui: &mut Ui, editor: &mut Editor, editable: bool) {
                 });
             }
         });
-    if editor.ring_preview {
+    if let Some(preview) = preview {
         let response = egui::Modal::new(Id::new("preview-actions-ring")).show(ui.ctx(), |ui| {
             ui.label(title("Actions Ring preview", 18.));
             let clicked = feature_panels::ring_preview(ui, &layer.ring);
@@ -1587,6 +1680,7 @@ fn ring_workspace(ui: &mut Ui, editor: &mut Editor, editable: bool) {
         });
         if response.should_close() || response.inner {
             editor.ring_preview = false;
+            preview.request_focus();
         }
     }
 }
@@ -1614,14 +1708,16 @@ fn edit_ring_slot(
             "Left",
             "Upper left",
         ][index];
-        ui.label(title(format!("Slot {} · {position}", index + 1), 16.));
-        if ui
-            .add_enabled(slot.is_some(), Button::new("Clear slot"))
-            .clicked()
-        {
-            *slot = None;
-            *entry = None;
-        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(title(format!("Slot {} · {position}", index + 1), 16.));
+            if ui
+                .add_enabled(slot.is_some(), Button::new("Clear slot"))
+                .clicked()
+            {
+                *slot = None;
+                *entry = None;
+            }
+        });
         ui.push_id(index, |ui| {
             let menu = ActionMenu {
                 id: ui.id().with("action"),
