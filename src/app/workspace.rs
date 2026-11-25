@@ -14,6 +14,7 @@ pub(super) fn header(
     actions: impl FnOnce(&mut Ui),
 ) -> bool {
     let mut back = false;
+    let title_width = (ui.available_width() * 0.48).max(124.);
     ui.allocate_ui_with_layout(
         vec2(ui.available_width(), HEADER_HEIGHT),
         Layout::left_to_right(Align::Center),
@@ -22,7 +23,11 @@ pub(super) fn header(
             if let Some(enabled) = back_enabled {
                 back = labeled_button(ui, "Back", Icon::Back, enabled).clicked();
             }
-            ui.label(title(name, 14.));
+            ui.scope(|ui| {
+                ui.set_max_width(title_width);
+                ui.add(egui::Label::new(title(name, 14.)).truncate())
+                    .on_hover_text(name);
+            });
             trailing(ui, |ui| {
                 ui.add_space(16.);
                 actions(ui);

@@ -243,10 +243,19 @@ enum Command {
 
 impl OpenOptions {
     pub(super) fn open_device(&mut self, device: Device, context: &egui::Context) {
+        self.selected_device = Some(device.key());
         if !self.editors.contains_key(&device.key()) {
             self.load_controls(device.clone(), context);
         }
         self.detail = Some(super::Detail::Device(device));
+    }
+
+    pub(super) fn open_device_details(&mut self, device: Device, context: &egui::Context) {
+        let key = device.key();
+        self.open_device(device, context);
+        if let Some(editor) = self.editors.get_mut(&key) {
+            editor.section = Section::Device;
+        }
     }
 
     fn load_controls(&mut self, device: Device, context: &egui::Context) {
@@ -518,7 +527,7 @@ fn settings_workspace(
                 ui.label(muted(format!("{} HID interfaces", device.interfaces)));
                 match &device.battery {
                     Ok(Some(battery)) => {
-                        ui.label(muted(super::ui::battery_caption(*battery)));
+                        ui.label(muted(super::gallery::battery_caption(*battery)));
                     }
                     Err(error) if online => {
                         ui.label(muted(format!("Couldn't read battery. {error}")));
@@ -1231,38 +1240,89 @@ fn profile_picker(
     ui.horizontal_wrapped(|ui| {
         ComboBox::from_id_salt("copy-imported-bindings")
             .selected_text("Load imported assignments")
+            .width(ui.available_width().min(320.))
             .show_ui(ui, |ui| {
                 for (index, (kind, profile)) in matching.iter().enumerate() {
                     let label = format!("{} · {}", kind.name(), profile.device_name);
                     ui.push_id(index, |ui| {
-                        if ui.button(label).clicked() {
-                            let mut changed = 0;
-                            let mut skipped = 0;
-                            for (&button, binding) in &profile.settings.buttons {
-                                if let Some(id) = controls::imported_control(button, available) {
-                                    editor.bindings_mut().insert(id, binding.clone());
-                                    changed += 1;
-                                } else {
-                                    skipped += 1;
-                                }
-                            }
+                        if ui
+                            .add(Button::new(label).truncate())
+                            .on_hover_text(&profile.device_key)
+                            .clicked()
+                        {
+                            let (loaded, skipped) = stage_imported_assignments(
+                                editor.bindings_mut(),
+                                profile,
+                                available,
+                            );
                             editor.entry = None;
-                            editor.notice = Some((
-                                if skipped == 0 {
-                                    format!("Loaded {changed} assignments. Save to keep them.")
-                                } else if changed == 0 {
-                                    format!("{skipped} imported assignments are unavailable on this device.")
+                            let mut notice = if loaded == 0 {
+                                "No compatible assignments loaded.".to_owned()
+                            } else {
+                                let noun = if loaded == 1 {
+                                    "assignment"
                                 } else {
-                                    format!("Loaded {changed} assignments and skipped {skipped} unavailable controls. Save to keep your changes.")
-                                },
-                                changed == 0,
-                            ));
+                                    "assignments"
+                                };
+                                format!(
+                                    "Loaded {loaded} {noun} into Default. Use Save to keep them."
+                                )
+                            };
+                            if !skipped.is_empty() {
+                                notice.push_str(&format!(" Skipped {}.", skipped.join(", ")));
+                            }
+                            editor.notice = Some((notice, loaded == 0));
                             ui.close();
                         }
                     });
                 }
             });
     });
+}
+
+fn stage_imported_assignments(
+    draft: &mut Bindings,
+    profile: &Profile,
+    available: &[Control],
+) -> (usize, Vec<String>) {
+    let mut loaded = 0;
+    let mut skipped = Vec::new();
+    for (&button, binding) in &profile.settings.buttons {
+        let label = button.name();
+        let Some(id) = controls::imported_control(button, available) else {
+            skipped.push(format!("{label} (control unavailable)"));
+            continue;
+        };
+        match binding {
+            Binding::Click(action) if controls::supports(action) => {
+                draft.insert(id, binding.clone());
+                loaded += 1;
+            }
+            Binding::Click(_) => skipped.push(format!("{label} (action unsupported here)")),
+            Binding::Gesture(directions) => {
+                let mut supported = BTreeMap::new();
+                for (&direction, action) in directions {
+                    if controls::supports(action) {
+                        supported.insert(direction, action.clone());
+                    } else {
+                        skipped.push(format!(
+                            "{label} {} (action unsupported here)",
+                            direction.name()
+                        ));
+                    }
+                }
+                loaded += supported.len();
+                if !supported.is_empty() {
+                    if let Some(Binding::Gesture(current)) = draft.get_mut(&id) {
+                        current.extend(supported);
+                    } else {
+                        draft.insert(id, Binding::Gesture(supported));
+                    }
+                }
+            }
+        }
+    }
+    (loaded, skipped)
 }
 
 fn profile_matches(kind: SourceKind, profile: &Profile, device: &Device) -> bool {
@@ -1664,5 +1724,52 @@ mod tests {
         assert!(editor.pointer_error.is_none());
         assert_eq!(editor.dpi_choice, Some(1200));
         assert_eq!(editor.wheel_choice.unwrap().threshold, 40);
+    }
+
+    #[test]
+    fn imported_assignments_stage_only_compatible_controls_and_directions() {
+        use openoptions::migration::Button as DeviceButton;
+
+        let action = Action::Named(NamedAction::Copy);
+        let profile = Profile {
+            settings: openoptions::migration::Settings {
+                buttons: BTreeMap::from([
+                    (DeviceButton::Forward, Binding::Click(action.clone())),
+                    (
+                        DeviceButton::Gesture,
+                        Binding::Gesture(BTreeMap::from([
+                            (Direction::Up, action.clone()),
+                            (Direction::Down, Action::Shortcut("invalid key".into())),
+                        ])),
+                    ),
+                ]),
+                ..Default::default()
+            },
+            ..Profile::default()
+        };
+        let mut draft = BTreeMap::from([(
+            0xC3,
+            Binding::Gesture(BTreeMap::from([(Direction::Down, action.clone())])),
+        )]);
+        let (count, skipped) = stage_imported_assignments(
+            &mut draft,
+            &profile,
+            &[Control {
+                id: 0xC3,
+                mouse: true,
+                raw_motion: true,
+            }],
+        );
+        assert_eq!(count, 1);
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped[0].contains("Forward button"));
+        assert!(skipped[1].contains("Down"));
+        assert_eq!(
+            draft[&0xC3],
+            Binding::Gesture(BTreeMap::from([
+                (Direction::Down, action.clone()),
+                (Direction::Up, action),
+            ])),
+        );
     }
 }
