@@ -41,9 +41,8 @@ impl ReceiverLink {
     }
 }
 
-pub(crate) fn connected_peripherals() -> Vec<Device> {
-    receivers()
-        .unwrap_or_default()
+pub(crate) fn connected_peripherals() -> Result<Vec<Device>, String> {
+    Ok(receivers()?
         .into_iter()
         .flat_map(|receiver| {
             let Ok(mut io) = ReceiverIo::open(&receiver) else {
@@ -57,35 +56,31 @@ pub(crate) fn connected_peripherals() -> Vec<Device> {
             (1..=count)
                 .filter_map(|slot| {
                     let info = io.slot(slot).ok()?;
-                    if !info.online
-                        || info.unit == [0; 4]
-                        || info.unit == [0xFF; 4]
-                        || info.product == 0
-                    {
+                    if info.unit == [0; 4] || info.unit == [0xFF; 4] || info.product == 0 {
                         return None;
                     }
                     let name = io
                         .peripheral_name(receiver.bolt, slot)
                         .unwrap_or_else(|| format!("Logitech {:04X}", info.product));
-                    Some(Device {
+                    Some(Device::paired(
                         name,
-                        product_id: info.product,
-                        connection: if receiver.bolt {
+                        info.product,
+                        if receiver.bolt {
                             "Logi Bolt"
                         } else {
                             "Unifying"
                         },
-                        interfaces: 1,
-                        receiver: Some(ReceiverLink {
+                        info.online,
+                        ReceiverLink {
                             receiver: receiver.clone(),
                             slot,
                             unit: info.unit,
-                        }),
-                    })
+                        },
+                    ))
                 })
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect())
 }
 
 pub fn receivers() -> Result<Vec<ReceiverDevice>, String> {

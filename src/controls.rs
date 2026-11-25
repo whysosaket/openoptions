@@ -1,11 +1,13 @@
+mod battery;
 mod focus;
+pub use battery::{Battery, battery};
 mod hosts;
 mod profiles;
 pub use hosts::{Host, Hosts, host_channels, rename_host, switch_host};
 pub use profiles::{ApplicationProfile, Layer, Profiles, RING_SLOTS, Ring};
 mod input;
 mod pointer;
-pub use pointer::{Pointer, PointerChange, Wheel, apply_pointer, pointer};
+pub use pointer::{Dpi, Pointer, PointerChange, Wheel, apply_pointer, pointer};
 mod protocol;
 
 use crate::devices::Device;
@@ -76,30 +78,27 @@ pub fn imported_control(button: Button, available: &[Control]) -> Option<u16> {
 }
 
 pub fn discover(device: &Device) -> Result<Vec<Control>, String> {
+    if !device.supports_hidpp() {
+        return Ok(Vec::new());
+    }
     Ok(protocol::Controls::open(device)?.available)
 }
 
-// The MX Master 3S has these physical controls on its Bluetooth HID++ interface.
-// Live enable still checks the actual device before taking over any reporting.
-pub fn known_controls(device: &Device) -> Vec<Control> {
-    if device.connection == "Bluetooth" && matches!(device.product_id, 0xB034) {
-        return [0x52, 0x53, 0x56, 0xC3, 0xC4]
-            .map(|id| Control {
-                id,
-                mouse: true,
-                raw_motion: false,
-            })
-            .to_vec();
-    }
-    Vec::new()
+pub(crate) fn read_direct_unit(device: &Device) -> Result<Option<[u8; 4]>, String> {
+    protocol::Controls::connect(device)?.unit_id()
 }
 
 pub fn supports(action: &Action) -> bool {
     input::supports(action)
 }
 
+pub fn live_platform_available() -> bool {
+    input::live_platform_available()
+}
+
 pub enum Status {
     Active,
+    ProfileChanged(Option<String>),
     ActionFailed(String),
     Ring {
         actions: Box<Ring>,
@@ -111,14 +110,19 @@ pub enum Status {
 pub struct Session {
     stop: Arc<AtomicBool>,
     status: Receiver<Status>,
-    actions: mpsc::Sender<Action>,
+    ring_commands: mpsc::Sender<RingCommand>,
     worker: Option<JoinHandle<()>>,
+}
+
+enum RingCommand {
+    Choose(usize),
+    Dismiss { restore_focus: bool },
 }
 
 impl Session {
     pub fn start(device: Device, profiles: Profiles) -> Self {
         let (send, status) = mpsc::channel();
-        let (actions, chosen) = mpsc::channel();
+        let (ring_commands, chosen) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let worker = thread::spawn(move || {
@@ -128,13 +132,19 @@ impl Session {
         Self {
             stop,
             status,
-            actions,
+            ring_commands,
             worker: Some(worker),
         }
     }
 
-    pub fn choose_action(&self, action: Action) {
-        let _ = self.actions.send(action);
+    pub fn choose_ring_slot(&self, index: usize) {
+        let _ = self.ring_commands.send(RingCommand::Choose(index));
+    }
+
+    pub fn dismiss_ring(&self, restore_focus: bool) {
+        let _ = self
+            .ring_commands
+            .send(RingCommand::Dismiss { restore_focus });
     }
 
     pub fn stop(&self) {
@@ -197,13 +207,19 @@ struct Press {
     origin: Option<(i32, i32)>,
 }
 
+struct OpenRing {
+    actions: Ring,
+    target: Option<focus::Target>,
+}
+
 fn run(
     device: &Device,
     profiles: &Profiles,
     stop: &AtomicBool,
     status: &mpsc::Sender<Status>,
-    chosen: &Receiver<Action>,
+    chosen: &Receiver<RingCommand>,
 ) -> Result<(), String> {
+    device.require_verified_identity()?;
     let mut hardware = protocol::Controls::open(device)?;
     if !profiles.has_bindings() {
         return Err("Assign an action before enabling controls.".into());
@@ -237,7 +253,7 @@ fn run(
         }
     }
     let mut effective = Bindings::new();
-    let mut ring_target = None;
+    let mut open_ring = None::<OpenRing>;
     let mut planned = Vec::new();
     let mut app = None;
     let mut next_check = Instant::now();
@@ -245,30 +261,42 @@ fn run(
     let result = (|| {
         let mut pressed = BTreeMap::<u16, Press>::new();
         while !stop.load(Ordering::Relaxed) {
-            if let Ok(action) = chosen.try_recv() {
-                let target = ring_target.take();
-                let needs_focus = !matches!(
-                    action,
-                    Action::SwitchHost(_)
-                        | Action::OpenApplication(_)
-                        | Action::Named(crate::migration::NamedAction::NoAction)
-                );
-                if needs_focus && !target.is_some_and(focus::Target::restore) {
-                    let _ = status.send(Status::ActionFailed(
-                        "Could not return to the application that opened the Actions Ring.".into(),
-                    ));
-                } else if dispatch(
-                    &mut hardware,
-                    &mut input,
-                    status,
-                    &action,
-                    &profiles.layer(app.as_deref()).ring,
-                    &mut ring_target,
-                )? {
-                    return Ok(());
+            if let Ok(command) = chosen.try_recv()
+                && let Some(ring) = open_ring.take()
+            {
+                match command {
+                    RingCommand::Dismiss { restore_focus } => {
+                        if restore_focus {
+                            let _ = ring.target.is_some_and(focus::Target::restore);
+                        }
+                    }
+                    RingCommand::Choose(index) => {
+                        if let Some(action) = ring.actions.get(index).and_then(Option::as_ref) {
+                            let needs_focus = !matches!(
+                                action,
+                                Action::SwitchHost(_)
+                                    | Action::OpenApplication(_)
+                                    | Action::Named(crate::migration::NamedAction::NoAction)
+                            );
+                            if needs_focus && !ring.target.is_some_and(focus::Target::restore) {
+                                let _ = status.send(Status::ActionFailed(
+                                    "Could not return to the application that opened the Actions Ring.".into(),
+                                ));
+                            } else if dispatch(
+                                &mut hardware,
+                                &mut input,
+                                status,
+                                action,
+                                &ring.actions,
+                                &mut open_ring,
+                            )? {
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
             }
-            if pressed.is_empty() && Instant::now() >= next_check {
+            if open_ring.is_none() && pressed.is_empty() && Instant::now() >= next_check {
                 next_check = Instant::now() + Duration::from_millis(160);
                 let focus = if profiles.applications.is_empty() {
                     None
@@ -281,6 +309,7 @@ fn run(
                     planned = arm_layer(&mut hardware, &effective, &next, stop)?;
                     effective = next;
                     app = focus;
+                    let _ = status.send(Status::ProfileChanged(app.clone()));
                 }
                 if !ready {
                     ready = true;
@@ -328,7 +357,7 @@ fn run(
                                     status,
                                     action,
                                     &profiles.layer(app.as_deref()).ring,
-                                    &mut ring_target,
+                                    &mut open_ring,
                                 )?
                             {
                                 return Ok(());
@@ -398,13 +427,16 @@ fn dispatch(
     status: &mpsc::Sender<Status>,
     action: &Action,
     ring: &Ring,
-    ring_target: &mut Option<focus::Target>,
+    open_ring: &mut Option<OpenRing>,
 ) -> Result<bool, String> {
     match action {
         Action::ShowActionsRing => {
-            if ring.iter().any(Option::is_some) {
+            if open_ring.is_none() && ring.iter().any(Option::is_some) {
                 let pointer = input.location().map_err(|error| error.to_string())?;
-                *ring_target = focus::current();
+                *open_ring = Some(OpenRing {
+                    actions: ring.clone(),
+                    target: focus::current(),
+                });
                 let _ = status.send(Status::Ring {
                     actions: Box::new(ring.clone()),
                     pointer,

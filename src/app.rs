@@ -1,6 +1,6 @@
 use eframe::egui;
 use openoptions::controls::{Control, Hosts, Pointer, Profiles};
-use openoptions::devices::{self, Device};
+use openoptions::devices::{self, Device, DeviceKey};
 use openoptions::migration::{self, Preview, Profile, Source, SourceKind};
 use openoptions::store::Store;
 use std::collections::BTreeMap;
@@ -29,19 +29,22 @@ enum Detail {
 
 type Saved = Vec<(SourceKind, Profile)>;
 
+struct DeviceSettings {
+    available: Result<Vec<Control>, String>,
+    pointer: Result<Pointer, String>,
+    hosts: Result<Option<Hosts>, String>,
+}
+
 enum Event {
     ControlsLoaded(
-        controls::DeviceKey,
-        Result<Vec<Control>, String>,
-        Result<Profiles, String>,
-        Option<Pointer>,
-        Result<Option<Hosts>, String>,
+        DeviceKey,
+        Option<DeviceSettings>,
+        Option<Result<Profiles, String>>,
     ),
-    ControlsSaved(controls::DeviceKey, Result<Profiles, String>),
-    HostsRead(controls::DeviceKey, Result<Option<Hosts>, String>),
-    HostSwitched(controls::DeviceKey, Result<(), String>),
-    ReceiversLoaded(Result<Vec<openoptions::pairing::ReceiverDevice>, String>),
-    PointerApplied(controls::DeviceKey, Result<Pointer, String>),
+    ControlsSaved(DeviceKey, Result<Profiles, String>),
+    HostsRead(DeviceKey, Result<Option<Hosts>, String>),
+    HostSwitched(DeviceKey, Result<(), String>),
+    PointerApplied(DeviceKey, controls::Tuning, Result<Pointer, String>),
     Discovery(Vec<Source>, Result<Vec<Device>, String>),
     Preview(Source, Result<Preview, String>),
     Store(Result<(Option<usize>, Saved), String>),
@@ -68,7 +71,7 @@ pub struct OpenOptions {
     notice: Option<Notice>,
     writing: bool,
     profiles: Saved,
-    editors: BTreeMap<controls::DeviceKey, controls::Editor>,
+    editors: BTreeMap<DeviceKey, controls::Editor>,
     live_controls: Option<controls::LiveControls>,
     actions_ring: Option<feature_panels::RingWindow>,
     pairing: Option<pairing::Wizard>,
@@ -127,6 +130,10 @@ impl OpenOptions {
     }
 
     fn scan(&mut self, context: &egui::Context) {
+        if self.scanning {
+            self.rescan = true;
+            return;
+        }
         self.scanning = true;
         self.job(context, || {
             Event::Discovery(migration::detect_sources(), devices::connected())
@@ -163,12 +170,14 @@ impl OpenOptions {
     fn receive(&mut self) {
         for event in self.events.try_iter() {
             match event {
-                Event::ControlsLoaded(key, available, saved, pointer, hosts) => {
+                Event::ControlsLoaded(key, hardware, saved) => {
                     if let Some(editor) = self.editors.get_mut(&key) {
-                        editor.loaded(available, saved);
-                        editor.hosts = Some(hosts);
-                        if let Some(pointer) = pointer {
-                            editor.pointer_loaded(pointer);
+                        if let Some(hardware) = hardware {
+                            editor.loaded(Some(hardware.available), saved);
+                            editor.hosts = Some(hardware.hosts);
+                            editor.pointer_loaded(hardware.pointer, None);
+                        } else {
+                            editor.loaded(None, saved);
                         }
                     }
                 }
@@ -188,9 +197,7 @@ impl OpenOptions {
                     if let Some(editor) = self.editors.get_mut(&key) {
                         editor.host_busy = false;
                         editor.notice = result.as_ref().err().map(|error| (error.clone(), true));
-                        if result.is_ok() || editor.hosts.is_none() {
-                            editor.hosts = Some(result);
-                        }
+                        editor.hosts = Some(result);
                     }
                 }
                 Event::HostSwitched(key, result) => {
@@ -205,20 +212,16 @@ impl OpenOptions {
                         });
                     }
                 }
-                Event::ReceiversLoaded(result) => {
-                    if let Some(wizard) = &mut self.pairing {
-                        wizard.receivers = Some(result);
-                    }
-                }
-                Event::PointerApplied(key, result) => {
+                Event::PointerApplied(key, tuning, result) => {
                     if let Some(editor) = self.editors.get_mut(&key) {
                         editor.pointer_busy = false;
                         editor.notice = Some(match result {
                             Ok(pointer) => {
-                                editor.pointer_loaded(pointer);
+                                editor.pointer_loaded(Ok(pointer), Some(tuning));
                                 ("Device settings applied.".into(), false)
                             }
                             Err(error) => {
+                                editor.reload_requested = true;
                                 (format!("Could not apply device settings. {error}"), true)
                             }
                         });
@@ -226,6 +229,32 @@ impl OpenOptions {
                 }
                 Event::Discovery(sources, devices) => {
                     self.sources = sources;
+                    if let Ok(devices) = &devices {
+                        for device in devices.iter().filter(|device| device.connected) {
+                            if let Some(editor) = self.editors.get_mut(&device.key()) {
+                                editor.reload_requested = true;
+                            }
+                        }
+                        if let Some(Detail::Device(device)) = &mut self.detail {
+                            let key = device.key();
+                            if let Some(current) = devices.iter().find(|device| device.key() == key)
+                            {
+                                *device = current.clone();
+                            } else {
+                                device.connected = false;
+                                device.battery = Ok(None);
+                            }
+                        }
+                        if let Some(live) = &mut self.live_controls
+                            && !devices
+                                .iter()
+                                .any(|device| device.connected && device.key() == live.key)
+                        {
+                            live.stopping = true;
+                            live.session.stop();
+                            self.actions_ring = None;
+                        }
+                    }
                     self.devices = devices;
                     self.scanning = false;
                 }

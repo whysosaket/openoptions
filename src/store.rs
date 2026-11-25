@@ -44,11 +44,23 @@ impl Store {
     }
 
     pub fn customizations(&self, device: &Device) -> Result<Profiles, String> {
-        let json = self.connection.query_row(
-            "SELECT bindings_json FROM control_profiles WHERE connection = ?1 AND product_id = ?2",
-            params![device.storage_connection().as_ref(), device.product_id],
-            |row| row.get::<_, String>(0),
-        ).optional().map_err(|error| error.to_string())?;
+        let exact = device.storage_connection();
+        // Model-wide rows from earlier versions remain the initial values until a unit is saved.
+        let json = self
+            .connection
+            .query_row(
+                "SELECT bindings_json FROM control_profiles
+            WHERE product_id = ?1 AND (connection = ?2 OR connection = ?3)
+            ORDER BY connection = ?2 DESC LIMIT 1",
+                params![
+                    device.product_id,
+                    exact.as_ref(),
+                    device.legacy_storage_connection()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
         let Some(json) = json else {
             return Ok(Profiles::default());
         };
@@ -78,6 +90,9 @@ impl Store {
     }
 
     pub fn save_customizations(&self, device: &Device, profiles: &Profiles) -> Result<(), String> {
+        if device.supports_hidpp() {
+            device.require_verified_identity()?;
+        }
         let json = serde_json::to_string(profiles).map_err(|error| error.to_string())?;
         self.connection.execute(
             "INSERT INTO control_profiles (connection, product_id, bindings_json) VALUES (?1, ?2, ?3)

@@ -1,5 +1,6 @@
 use super::{Detail, Notice, OpenOptions, Page, action_labels::action_label, theme::*, workspace};
 use eframe::egui::{self, Button, CentralPanel, Frame, RichText, ScrollArea, TextEdit, Ui, Vec2};
+use openoptions::controls::Battery;
 use openoptions::devices::Device;
 use openoptions::migration::{
     Action, Binding, Profile, ScrollDirection, Source, SourceKind, WheelMode,
@@ -14,7 +15,7 @@ impl eframe::App for OpenOptions {
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
         self.receive();
         self.poll_controls(root.ctx());
-        if self.rescan {
+        if self.rescan && !self.scanning {
             self.rescan = false;
             self.scan(root.ctx());
         }
@@ -584,16 +585,41 @@ fn device_tile(ui: &mut Ui, device: &Device, width: f32) -> bool {
         egui::FontId::proportional(16.),
         TEXT,
     );
-    painter.circle_filled(details + egui::vec2(4., 34.), 3.5, SUCCESS);
+    let (connection, color) = if device.connected {
+        ("Connected", SUCCESS)
+    } else {
+        ("Disconnected", MUTED)
+    };
+    painter.circle_filled(details + egui::vec2(4., 34.), 3.5, color);
     painter.text(
         details + egui::vec2(14., 34.),
         egui::Align2::LEFT_CENTER,
-        format!("Connected · {}", device.connection),
+        format!("{connection} · {}", device.connection),
         egui::FontId::proportional(12.),
         MUTED,
     );
+    if let Ok(Some(battery)) = device.battery {
+        painter.text(
+            rect.right_bottom() - egui::vec2(17., 27.),
+            egui::Align2::RIGHT_CENTER,
+            battery_caption(battery),
+            egui::FontId::proportional(12.),
+            MUTED,
+        );
+    }
     paint_focus(ui, &response);
     response.on_hover_text(&device.name).clicked()
+}
+
+pub(super) fn battery_caption(battery: Battery) -> String {
+    match battery {
+        Battery::Percent(value) => format!("Battery {value}%"),
+        Battery::Full => "Battery full".into(),
+        Battery::Good => "Battery good".into(),
+        Battery::Low => "Battery low".into(),
+        Battery::Critical => "Battery critical".into(),
+        Battery::Charging => "Charging".into(),
+    }
 }
 
 fn mx_master(painter: &egui::Painter, rect: egui::Rect) {

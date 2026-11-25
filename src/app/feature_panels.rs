@@ -8,7 +8,7 @@ use openoptions::controls::{RING_SLOTS, Ring};
 const RING_EDGE: f32 = 288.;
 
 pub(super) struct RingWindow {
-    pub actions: Ring,
+    actions: Ring,
     position: Pos2,
     seen_focus: bool,
 }
@@ -51,7 +51,8 @@ impl OpenOptions {
                 if class == egui::ViewportClass::EmbeddedWindow {
                     let response = egui::Modal::new(Id::new("actions-ring-embedded"))
                         .show(ui.ctx(), |ui| ring(ui, &window.actions, None, RING_EDGE));
-                    return (response.inner, response.should_close());
+                    let close = response.should_close() && response.inner.is_none();
+                    return (response.inner, close, close);
                 }
                 let (focused, close) = ui.input(|input| {
                     (
@@ -67,15 +68,16 @@ impl OpenOptions {
                     .show_inside(ui, |ui| {
                         choice = ring(ui, &window.actions, None, RING_EDGE);
                     });
-                (choice, close || lost_focus)
+                (choice, close || lost_focus, close && !lost_focus)
             },
         );
         if outcome.0.is_some() || outcome.1 {
-            if let Some(index) = outcome.0
-                && let Some(action) = window.actions[index].clone()
-                && let Some(live) = &self.live_controls
-            {
-                live.session.choose_action(action);
+            if let Some(live) = &self.live_controls {
+                if outcome.1 {
+                    live.session.dismiss_ring(outcome.2);
+                } else if let Some(index) = outcome.0 {
+                    live.session.choose_ring_slot(index);
+                }
             }
             self.actions_ring = None;
             root.ctx().request_repaint();
