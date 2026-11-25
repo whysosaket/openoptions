@@ -4,7 +4,7 @@ pub use battery::{Battery, battery};
 mod hosts;
 mod profiles;
 pub use hosts::{Host, Hosts, host_channels, rename_host, switch_host};
-pub use profiles::{ApplicationProfile, Layer, Profiles, RING_SLOTS, Ring};
+pub use profiles::{ApplicationProfile, Layer, Profiles, RING_SLOTS, Ring, application_id};
 mod input;
 mod pointer;
 pub use pointer::{Dpi, Pointer, PointerChange, Wheel, apply_pointer, pointer};

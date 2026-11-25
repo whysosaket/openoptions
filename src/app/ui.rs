@@ -37,6 +37,7 @@ impl eframe::App for OpenOptions {
                             (Page::Devices, "Devices"),
                             (Page::Import, "Import settings"),
                             (Page::Profiles, "Profiles"),
+                            (Page::Settings, "Settings"),
                         ] {
                             if ui.selectable_label(self.page == page, label).clicked() {
                                 self.navigate(page);
@@ -73,6 +74,7 @@ impl eframe::App for OpenOptions {
                                 Page::Import if self.preview.is_some() => self.review_ui(ui),
                                 Page::Import => self.import_sources(ui),
                                 Page::Profiles => self.profiles_ui(ui),
+                                Page::Settings => self.settings_ui(ui),
                             }
                         }
                     });
@@ -101,6 +103,7 @@ impl OpenOptions {
             (_, Page::Import) if review => "Review import",
             (_, Page::Import) => "Import settings",
             (_, Page::Profiles) => "Profiles",
+            (_, Page::Settings) => "Settings",
         };
         let inventory = self.detail.is_none() && self.page == Page::Devices;
         let sources = self.page == Page::Import && !review;
