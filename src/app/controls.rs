@@ -1084,7 +1084,7 @@ fn inspector(ui: &mut Ui, editor: &mut Editor, controls: &[Control]) {
         card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(title("Control inspector", 16.));
-            ui.label(muted("Select a control to see its current assignment."));
+            ui.label(muted("Select a control to edit it."));
         });
         return;
     };
@@ -1625,7 +1625,7 @@ fn ring_workspace(
     preview: Option<egui::Response>,
 ) {
     let layer = editor.draft.layer_mut(editor.application.as_deref());
-    let ring_edge = (ui.available_height() - 30.).clamp(142., 288.);
+    let ring_edge = (ui.available_height() - 30.).clamp(100., 288.);
     ScrollArea::vertical()
         .id_salt("actions-ring")
         .show(ui, |ui| {
