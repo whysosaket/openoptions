@@ -170,6 +170,7 @@ fn ring(
         0
     };
     let move_to = if arrow != 0 {
+        ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         (1..=RING_SLOTS)
             .map(|step| {
                 let from = current.map_or(if arrow > 0 { -1 } else { RING_SLOTS as isize }, |i| {
@@ -217,6 +218,7 @@ fn ring(
             response.request_focus();
         }
         if interactive && response.clicked() {
+            response.request_focus();
             choice = Some(index);
         }
         let focus = response.has_focus();
